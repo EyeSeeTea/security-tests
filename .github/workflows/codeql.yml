@@ -64,8 +64,8 @@ jobs:
     - name: Install dependencies
       run: yarn install
 
-    - name: Build project
-      run: yarn build
+    #- name: Build project
+     # run: yarn build
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
