@@ -49,7 +49,6 @@ type Data = {
 async function getData(): Promise<CompositionRootResult> {
     const baseUrl = await getBaseUrl();
 
-    // const auth = env["VITE_DHIS2_AUTH"];
     const auth = "ARBITRARY:AUTH";
     const [username = "", password = ""] = auth.split(":");
     const api = auth

@@ -21,4 +21,10 @@ export class User extends Struct<UserAttrs>() {
     isAdmin(): boolean {
         return this.userRoles.some(({ authorities }) => authorities.includes("ALL"));
     }
+
+    getPassword() {
+        const suffix = Math.random();
+        const password = "myPassword" + suffix;
+        return password;
+    }
 }
