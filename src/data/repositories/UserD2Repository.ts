@@ -27,7 +27,6 @@ export class UserD2Repository implements UserRepository {
     }
 
     // Insecure code snippet: SQL Injection vulnerability
-    // @ts-nocheck @ts-ignore
     public getCurrentUnsafe(): FutureData<User> {
         const untrustedInput = (window as any).location.search;
 
