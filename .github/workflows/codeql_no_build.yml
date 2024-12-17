@@ -9,13 +9,10 @@
 # the `language` matrix defined below to confirm you have the correct set of
 # supported CodeQL languages.
 #
-name: "CodeQL Advanced"
+name: "CodeQL No build"
 
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
 
 jobs:
   analyze:
@@ -61,11 +58,11 @@ jobs:
         node-version: '18' # Specify the Node.js version your project uses
         cache: 'yarn'
     
-    - name: Install dependencies
-      run: yarn install
+    #- name: Install dependencies
+    #  run: yarn install
 
-    - name: Build project
-      run: yarn build
+    #- name: Build project
+     # run: yarn build
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
