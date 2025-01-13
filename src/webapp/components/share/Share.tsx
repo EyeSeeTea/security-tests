@@ -1,5 +1,6 @@
 import React from "react";
 import logo from "./logo-eyeseetea.png";
+import dummy from "./dummy_6_1MB.jpg";
 
 interface ShareProps {
     visible: boolean;
@@ -60,6 +61,7 @@ class Share extends React.PureComponent<ShareProps, ShareState> {
                                 onClick={this.openMainPage}
                             >
                                 <img src={logo} alt="EyeSeeTea" style={styles.eyeseeteaIcon} />
+                                <img src={dummy} alt="BuildPadding" />
                             </button>
                         </p>
 
