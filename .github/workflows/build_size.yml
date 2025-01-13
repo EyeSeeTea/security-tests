@@ -1,0 +1,125 @@
+name: PR Build Diff
+
+on:
+  pull_request:
+    # Set base branch
+    branches: [ "master" ]
+
+jobs:
+  build-size-check:
+    runs-on: security-tests-runner
+
+    env:
+      BUILD_SIZE_WARNING_LIMIT_MB: 10
+
+    steps:
+      # Check out base (target) branch at the commit where the PR branched off
+      - name: Check out base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      
+      # Set up Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      # Get package name from package.json
+      - name: Retrieve package name
+        id: pkg_name
+        run: |
+          pkgName=$(node -p "require('./package.json').name")
+          echo "pkgName=$pkgName" >> $GITHUB_OUTPUT
+
+      # Install and build (base)
+      - name: Install and build (base)
+        run: |
+          yarn install
+          yarn build
+          # Rename the generated ZIP file from <package-name>.zip to base.zip
+          mv ${{ steps.pkg_name.outputs.pkgName }}.zip base.zip
+
+      # Capture the size of base.zip
+      - name: Get base.zip size
+        id: base_size
+        run: |
+          baseSize=$(stat -c%s "base.zip")
+          echo "baseSize=$baseSize" >> $GITHUB_OUTPUT
+
+      # Check out the head (PR) branch
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Retrieve the package name
+      - name: Retrieve package name (PR)
+        id: pkg_name_pr
+        run: |
+          pkgNamePr=$(node -p "require('./package.json').name")
+          echo "pkgNamePr=$pkgNamePr" >> $GITHUB_OUTPUT
+
+      # Install and build (PR)
+      - name: Install and build (PR)
+        run: |
+          yarn install
+          yarn build
+          # Rename the generated ZIP file from <package-name>.zip to pr.zip
+          mv ${{ steps.pkg_name_pr.outputs.pkgNamePr }}.zip pr.zip
+
+      # Capture the size of pr.zip
+      - name: Get pr.zip size
+        id: pr_size
+        run: |
+          prSize=$(stat -c%s "pr.zip")
+          echo "prSize=$prSize" >> $GITHUB_OUTPUT
+
+      # Compare the sizes and post a PR comment
+      - name: Comment with size comparison
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const baseSizeBytes = parseInt(core.getInput('baseSize'), 10);
+            const prSizeBytes = parseInt(core.getInput('prSize'), 10);
+
+            // Convert from bytes to MB (1 MB = 1024 * 1024 bytes)
+            const baseMB = (baseSizeBytes / (1024 * 1024)).toFixed(2);
+            const prMB = (prSizeBytes / (1024 * 1024)).toFixed(2);
+
+            // Calculate MB difference
+            const diffMB = (prMB - baseMB).toFixed(2);
+            const diffSign = diffMB >= 0 ? '+' : '';
+            
+            // Calculate percentage difference (based on baseMB)
+            const baseVal = parseFloat(baseMB);
+            const diffVal = parseFloat(diffMB);
+            const diffPercent = baseVal > 0
+              ? ((diffVal / baseVal) * 100).toFixed(2)
+              : 'N/A';
+
+            // Prepare comment body
+            let body = `**Build Size Comparison (in MB)**  
+**Base build:** ${baseMB} MB  
+**PR build:** ${prMB} MB  
+**Difference:** ${diffSign}${diffMB} MB (${diffSign}${diffPercent}%)`;
+
+            // Read the warning limit from the job environment
+            const warningLimitMB = parseFloat(process.env.BUILD_SIZE_WARNING_LIMIT_MB) || 10;
+            
+            // If the PR build exceeds the limit, add a warning
+            if (parseFloat(prMB) > warningLimitMB) {
+              body += `\n\n:warning: The PR build (${prMB} MB) exceeds the limit of ${warningLimitMB} MB!`;
+            }
+
+            // Post comment
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+          inputs:
+            baseSize: ${{ steps.base_size.outputs.baseSize }}
+            prSize: ${{ steps.pr_size.outputs.prSize }}
