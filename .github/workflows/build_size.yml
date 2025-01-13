@@ -81,8 +81,8 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            const baseSizeBytes = parseInt(core.getInput('baseSize'), 10);
-            const prSizeBytes = parseInt(core.getInput('prSize'), 10);
+            const baseSizeBytes = parseInt("${{ steps.base_size.outputs.baseSize }}", 10);
+            const prSizeBytes = parseInt("${{ steps.pr_size.outputs.prSize }}", 10);
 
             // Convert from bytes to MB (1 MB = 1024 * 1024 bytes)
             const baseMB = (baseSizeBytes / (1024 * 1024)).toFixed(2);
@@ -100,18 +100,19 @@ jobs:
               : 'N/A';
 
             // Prepare comment body
-            let body = `**Build Size Comparison (in MB)**  
-**Base build:** ${baseMB} MB  
-**PR build:** ${prMB} MB  
-**Difference:** ${diffSign}${diffMB} MB (${diffSign}${diffPercent}%)`;
+            let lines = [
+              '**Build Size Comparison (in MB)**',
+              `**Base build:** ${baseMB} MB`,
+              `**PR build:** ${prMB} MB`,
+              `**Difference:** ${diffSign}${diffMB} MB (${diffSign}${diffPercent}%)`
+            ];
 
-            // Read the warning limit from the job environment
             const warningLimitMB = parseFloat(process.env.BUILD_SIZE_WARNING_LIMIT_MB) || 10;
-            
-            // If the PR build exceeds the limit, add a warning
             if (parseFloat(prMB) > warningLimitMB) {
-              body += `\n\n:warning: The PR build (${prMB} MB) exceeds the limit of ${warningLimitMB} MB!`;
+              lines.push(`:warning: The PR build (${prMB} MB) exceeds the limit of ${warningLimitMB} MB!`);
             }
+
+            const body = lines.join('\n');
 
             // Post comment
             github.rest.issues.createComment({
@@ -120,6 +121,3 @@ jobs:
               issue_number: context.issue.number,
               body
             });
-          inputs:
-            baseSize: ${{ steps.base_size.outputs.baseSize }}
-            prSize: ${{ steps.pr_size.outputs.prSize }}
