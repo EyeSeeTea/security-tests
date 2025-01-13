@@ -1,4 +1,4 @@
-name: PR Build Diff
+name: "PR Build Diff"
 
 on:
   pull_request:
