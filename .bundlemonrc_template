@@ -1,31 +1,26 @@
 {
-    "baseDir": ".",
+    "baseDir": "./build",
     "files": [
         {
-            "path": "./*.zip",
+            "path": "./$npm_package_name.zip",
             "friendlyName": "Build ZIP",
             "compression": "none",
-            "maxSize": "5 MB",
-            "maxPercentIncrease": 25
+            "maxSize": "$size_limit",
+            "maxPercentIncrease": "$percent_limit"
         },
         {
-            "path": "./build/assets/index-<hash>.js",
-            "friendlyName": "Index",
-            "compression": "gzip"
-        },
-        {
-            "path": "./build/**/*",
+            "path": "./**/*.{$build_file_types}",
             "friendlyName": "Build Folder Files",
             "compression": "gzip"
         }
     ],
     "groups": [
         {
-            "path": "./build/**/*",
+            "path": "./**/*.{$build_file_types}",
             "friendlyName": "Build Folder",
             "compression": "gzip",
-            "maxSize": "5 MB",
-            "maxPercentIncrease": 25
+            "maxSize": "$size_limit",
+            "maxPercentIncrease": "$percent_limit"
         }
     ],
     "reportOutput": [
