@@ -9,6 +9,11 @@
             "maxPercentIncrease": 25
         },
         {
+            "path": "./build/assets/index-<hash>.js",
+            "friendlyName": "Index",
+            "compression": "gzip"
+        },
+        {
             "path": "./build/**/*",
             "friendlyName": "Build Folder Files",
             "compression": "gzip"
