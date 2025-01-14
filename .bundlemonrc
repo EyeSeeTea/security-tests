@@ -11,7 +11,9 @@
         {
             "path": "./**/*.{css,eot,html,ico,jpg,js,json,png,po,pot,ttf,webapp,woff,woff2}",
             "friendlyName": "Build Folder Files",
-            "compression": "gzip"
+            "compression": "none",
+            "maxSize": "4 MB",
+            "maxPercentIncrease": "20"
         }
     ],
     "groups": [

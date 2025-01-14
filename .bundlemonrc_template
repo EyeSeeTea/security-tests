@@ -11,7 +11,9 @@
         {
             "path": "./**/*.{$build_file_types}",
             "friendlyName": "Build Folder Files",
-            "compression": "gzip"
+            "compression": "none",
+            "maxSize": "$size_limit",
+            "maxPercentIncrease": "20"
         }
     ],
     "groups": [
