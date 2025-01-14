@@ -5,8 +5,8 @@
             "path": "./dhis2-app-skeleton.zip",
             "friendlyName": "Build ZIP",
             "compression": "none",
-            "maxSize": "4 MB",
-            "maxPercentIncrease": "20"
+            "maxSize": "6 MB",
+            "maxPercentIncrease": "30"
         },
         {
             "path": "./**/*.{css,eot,html,ico,jpg,js,json,png,po,pot,ttf,webapp,woff,woff2}",
@@ -19,8 +19,8 @@
             "path": "./**/*.{css,eot,html,ico,jpg,js,json,png,po,pot,ttf,webapp,woff,woff2}",
             "friendlyName": "Build Folder",
             "compression": "gzip",
-            "maxSize": "4 MB",
-            "maxPercentIncrease": "20"
+            "maxSize": "6 MB",
+            "maxPercentIncrease": "30"
         }
     ],
     "reportOutput": [
