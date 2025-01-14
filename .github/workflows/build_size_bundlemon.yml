@@ -1,0 +1,41 @@
+name: "PR Build Diff (with BundleMon)"
+
+# on:
+#   pull_request:
+#     # Set base branch
+#     branches: [ "master" ]
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-size-check:
+    runs-on: security-tests-runner
+
+    steps:
+      # Check out base (target) branch at the commit where the PR branched off
+      - name: Check out base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      
+      # Set up Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      # Install and build
+      - name: Install and build
+        run: |
+          yarn install
+          yarn build
+
+      - name: BundleMon
+        uses: lironer/bundlemon-action@v1
+

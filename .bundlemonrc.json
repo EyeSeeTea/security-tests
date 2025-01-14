@@ -1,0 +1,22 @@
+{
+    "baseDir": ".",
+    "files": [
+        {
+            "path": "*.zip",
+            "friendlyName": "Build ZIP",
+            "compression": "none",
+            "maxSize": "5 MB",
+            "maxPercentIncrease": 25
+        }
+    ],
+    "reportOutput": [
+        [
+            "github",
+            {
+                "checkRun": true,
+                "commitStatus": true,
+                "prComment": true
+            }
+        ]
+    ]
+}

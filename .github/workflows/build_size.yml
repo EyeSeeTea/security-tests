@@ -1,9 +1,12 @@
 name: "PR Build Diff"
 
+# on:
+#   pull_request:
+#     # Set base branch
+#     branches: [ "master" ]
+
 on:
-  pull_request:
-    # Set base branch
-    branches: [ "master" ]
+  workflow_dispatch:
 
 jobs:
   build-size-check:
