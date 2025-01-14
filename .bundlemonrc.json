@@ -9,6 +9,15 @@
             "maxPercentIncrease": 25
         }
     ],
+    "groups": [
+        {
+            "path": "./build/**/*",
+            "friendlyName": "Build Folder",
+            "compression": "gzip",
+            "maxSize": "5 MB",
+            "maxPercentIncrease": 25
+        }
+    ],
     "reportOutput": [
         [
             "github",
