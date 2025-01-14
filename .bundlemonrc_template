@@ -1,0 +1,36 @@
+{
+    "baseDir": "./build",
+    "files": [
+        {
+            "path": "./$npm_package_name.zip",
+            "friendlyName": "Build ZIP",
+            "compression": "none",
+            "maxSize": "$size_limit",
+            "maxPercentIncrease": "$percent_limit"
+        },
+        {
+            "path": "./**/*.{$build_file_types}",
+            "friendlyName": "Build Folder Files",
+            "compression": "gzip"
+        }
+    ],
+    "groups": [
+        {
+            "path": "./**/*.{$build_file_types}",
+            "friendlyName": "Build Folder",
+            "compression": "gzip",
+            "maxSize": "$size_limit",
+            "maxPercentIncrease": "$percent_limit"
+        }
+    ],
+    "reportOutput": [
+        [
+            "github",
+            {
+                "checkRun": true,
+                "commitStatus": true,
+                "prComment": true
+            }
+        ]
+    ]
+}

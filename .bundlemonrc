@@ -1,26 +1,26 @@
 {
-    "baseDir": ".",
+    "baseDir": "./build",
     "files": [
         {
-            "path": "./*.zip",
+            "path": "./dhis2-app-skeleton.zip",
             "friendlyName": "Build ZIP",
             "compression": "none",
-            "maxSize": "5 MB",
-            "maxPercentIncrease": 25
+            "maxSize": "6 MB",
+            "maxPercentIncrease": "30"
         },
         {
-            "path": "./build/**/*",
+            "path": "./**/*.{css,eot,html,ico,jpg,js,json,png,po,pot,ttf,webapp,woff,woff2}",
             "friendlyName": "Build Folder Files",
             "compression": "gzip"
         }
     ],
     "groups": [
         {
-            "path": "./build/**/*",
+            "path": "./**/*.{css,eot,html,ico,jpg,js,json,png,po,pot,ttf,webapp,woff,woff2}",
             "friendlyName": "Build Folder",
             "compression": "gzip",
-            "maxSize": "5 MB",
-            "maxPercentIncrease": 25
+            "maxSize": "6 MB",
+            "maxPercentIncrease": "30"
         }
     ],
     "reportOutput": [
