@@ -2,11 +2,16 @@
     "baseDir": ".",
     "files": [
         {
-            "path": "*.zip",
+            "path": "./*.zip",
             "friendlyName": "Build ZIP",
             "compression": "none",
             "maxSize": "5 MB",
             "maxPercentIncrease": 25
+        },
+        {
+            "path": "./build/**/*",
+            "friendlyName": "Build Folder Files",
+            "compression": "gzip"
         }
     ],
     "groups": [
