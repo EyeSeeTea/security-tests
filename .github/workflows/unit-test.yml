@@ -1,11 +1,10 @@
 name: Application testing
 on:
-    push:
     workflow_dispatch:
 jobs:
     unit-tests:
         name: Unit tests
-        runs-on: security-tests-runner
+        runs-on: self-hosted
         steps:
             - name: Checkout repository
               uses: actions/checkout@v2

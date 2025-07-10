@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-size-check:
-    runs-on: security-tests-runner
+    runs-on: self-hosted
 
     env:
       BUILD_SIZE_WARNING_LIMIT_MB: 10

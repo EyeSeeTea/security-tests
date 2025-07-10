@@ -6,15 +6,11 @@ name: "PR Build Diff (with BundleMon)"
 #     branches: [ "master" ]
 
 on:
-  push:
-    branches: ["master"]
-  pull_request:
-    branches: [ "master" ]
   workflow_dispatch:
 
 jobs:
   build-size-check:
-    runs-on: security-tests-runner
+    runs-on: self-hosted
 
     steps:
       # Check out base (target) branch at the commit where the PR branched off
