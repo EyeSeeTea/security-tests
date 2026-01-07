@@ -16,7 +16,7 @@ jobs:
         with:
           scan-type: 'fs'
           scanners: 'secret'
-          secret-config: 'trivy.yaml'
+          trivy-config: 'trivy.yaml'
           ignore-unfixed: true
           format: 'sarif'
           output: 'trivy-results.sarif'
