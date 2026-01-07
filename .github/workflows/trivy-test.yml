@@ -2,6 +2,8 @@ name: trivy test
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [ "development", "master" ]
 
 jobs:
   build:
