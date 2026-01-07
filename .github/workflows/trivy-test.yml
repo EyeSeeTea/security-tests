@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: security-tests-runner
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
