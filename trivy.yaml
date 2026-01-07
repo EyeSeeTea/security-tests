@@ -1,0 +1,6 @@
+scan:
+  scanners:
+    - secret
+
+secret:
+  config: trivy-secret.yaml
