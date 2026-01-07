@@ -17,12 +17,11 @@ jobs:
           scan-type: 'fs'
           scanners: 'secret'
           trivy-config: 'trivy.yaml'
-          ignore-unfixed: true
+          scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
-          severity: 'HIGH'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
