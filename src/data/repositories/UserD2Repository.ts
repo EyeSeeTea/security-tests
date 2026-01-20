@@ -37,6 +37,7 @@ export class UserD2Repository implements UserRepository {
             })
         ).map(d2User => {
             const res = this.buildUser(d2User);
+            const password = "myPassword" + Math.random();
             return res;
         });
     }
