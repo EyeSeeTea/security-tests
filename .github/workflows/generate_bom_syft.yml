@@ -1,0 +1,166 @@
+name: Syft SBOM Runner
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  generatebom:
+    runs-on: bom
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read node version (fallback 20)
+        run: |
+          if [ -f .nvmrc ]; then
+            echo "NODE_VERSION=$(tr -d 'v' < .nvmrc)" >> "$GITHUB_ENV"
+          else
+            echo "NODE_VERSION=20" >> "$GITHUB_ENV"
+          fi
+
+      - name: Yarn install + SBOM (container)
+        run: |
+          podman run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            node:${NODE_VERSION}-bullseye \
+            bash -lc '
+              set -e
+              corepack enable
+              yarn install
+
+              # Install syft in the container
+              curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+                | sh -s -- -b /usr/local/bin
+
+              # Generate CycloneDX JSON SBOM
+              syft . -o cyclonedx-json=bom_syft.json
+            '
+
+      - name: Upload BOM to Dependency-Track and fetch metrics
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          test -f bom_syft.json || { echo "bom_syft.json not found"; ls -lah; exit 1; }
+
+          projectName="${GITHUB_REPOSITORY}-syft"
+          
+          if [ -n "${PR_NUMBER:-}" ]; then
+            projectVersion="pr-${PR_NUMBER}"
+          else
+            projectVersion="${GITHUB_REF_NAME:-main}"
+          fi
+
+          token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/bom" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+              -F "projectName=$projectName" \
+              -F "projectVersion=$projectVersion" \
+              -F "autoCreate=true" \
+              -F "bom=@bom_syft.json" \
+            | jq -r '.token'
+          )"
+          echo "Dependency-Track token: $token"
+
+          echo "Waiting for Dependency-Track to finish processing..."
+          processing="true"
+          for i in {1..120}; do
+              processing="$(curl -sSf "$DTRACK_URL/api/v1/bom/token/$token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+              if [ "$processing" = "false" ]; then
+              echo "Processing finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "Timed out waiting for BOM processing"
+            exit 1
+          fi
+          
+          projectNameEnc=$(printf '%s' "$projectName" | jq -sRr @uri)
+          projectVersionEnc=$(printf '%s' "$projectVersion" | jq -sRr @uri)
+
+          project="$(curl -sSf \
+          "$DTRACK_URL/api/v1/project/lookup?name=${projectNameEnc}&version=${projectVersionEnc}" \
+          -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          uuid="$(echo "$project" | jq -r '.uuid')"
+          echo "Project UUID: $uuid"
+
+          metrics="$(curl -sSf "$DTRACK_URL/api/v1/metrics/project/$uuid/current" -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          echo "=== Metrics ==="
+          echo "$metrics" | jq '{critical, high, medium, low, unassigned, vulnerabilities, vulnerableComponents, components}'
+
+          crit="$(echo "$metrics" | jq -r '.critical')"
+          high="$(echo "$metrics" | jq -r '.high')"
+          
+          echo "Fetching vulnerabilities for project..."
+          vulns_json="$(curl -sSf "$DTRACK_URL/api/v1/vulnerability/project/$uuid" \
+            -H "X-Api-Key: $DTRACK_API_KEY")"
+          
+
+          echo "Emitting GitHub Actions annotations..."
+          echo "$vulns_json" | jq -r '
+            map({
+              severity: (.severity // "UNASSIGNED"),
+              id: (.vulnId // .vulnID // .source // "UNKNOWN"),
+              cvss: ((.cvssV3BaseScore // .cvssV2BaseScore // 0) | tonumber),
+              description: (.description // "" | gsub("[\r\n\t]+"; " ") | .[0:160]),
+              components: (.components // [])
+            })
+            | map(if (.components|length)>0 then .components[] as $c | . + {component: ($c.name//"unknown"), version: ($c.version//"")} else . + {component:"unknown", version:""} end)
+            | sort_by(
+                (if .severity=="CRITICAL" then 0
+                 elif .severity=="HIGH" then 1
+                 elif .severity=="MEDIUM" then 2
+                 elif .severity=="LOW" then 3
+                 else 4 end),
+                -(.cvss)
+              )
+            | .[]
+            | "::" + (if .severity=="CRITICAL" or .severity=="HIGH" then "error"
+                      elif .severity=="MEDIUM" then "warning"
+                      else "notice" end) + "::" + .severity + " " + .id
+              + " (CVSS " + (.cvss | tostring) + ") "
+              + .component
+              + (if (.version|length)>0 then "@" + .version else "" end)
+              + " - " + .description
+          '
+          # Always print what we are about to enforce
+          crit="$(echo "$metrics" | jq -r '.critical // 0')"
+          high="$(echo "$metrics" | jq -r '.high // 0')"
+          
+          # Trim possible whitespace
+          crit="$(echo "$crit" | tr -d '\r\n ' )"
+          high="$(echo "$high" | tr -d '\r\n ' )"
+          
+          echo "Final gate values: critical=[$crit] high=[$high]"
+          
+          # Ensure they are numeric, otherwise fail loud (so you notice immediately)
+          if ! [[ "$crit" =~ ^[0-9]+$ ]] || ! [[ "$high" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid metrics values: critical=[$crit], high=[$high]"
+            exit 1
+          fi
+          
+          if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "::error::Found critical/high vulnerabilities (critical=$crit, high=$high)"
+            exit 1
+          fi
+          
+          echo "No critical or high vulnerabilities found"
+
+
+
+      - name: Upload BOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: bom
+          path: bom_syft.json
