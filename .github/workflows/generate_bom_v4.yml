@@ -37,8 +37,19 @@ jobs:
               if [ ! -f src/package.json ]; then
                 printf "{\n  \"name\": \"local-src\",\n  \"version\": \"0.0.0\"\n}\n" > src/package.json
               fi
+              # CycloneDX rejects invalid package names like "$"; strip for BOM generation only.
+              cp package.json /tmp/package.json.orig
+              node <<'"'"'NODE'"'"'
+              const fs = require("fs");
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              if (pkg.dependencies && pkg.dependencies["$"]) {
+                delete pkg.dependencies["$"];
+              }
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n"); 
+              NODE
               yarn install
-              yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON '
+              yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON
+              mv /tmp/package.json.orig package.json '
 
       - name: Upload BOM to Dependency-Track and fetch metrics
         env:
