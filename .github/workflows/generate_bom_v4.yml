@@ -13,13 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read node version (fallback 20)
+      - name: Read node version (min 20.18.0 for CycloneDX)
         run: |
           if [ -f .nvmrc ]; then
-            echo "NODE_VERSION=$(tr -d 'v' < .nvmrc)" >> "$GITHUB_ENV"
+            ver="$(tr -d 'v' < .nvmrc)"
           else
-            echo "NODE_VERSION=20" >> "$GITHUB_ENV"
+            ver="20.18.0"
           fi
+          min="20.18.0"
+          if [ "$(printf '%s\n' "$ver" "$min" | sort -V | head -n1)" = "$ver" ] && [ "$ver" != "$min" ]; then
+            ver="$min"
+          fi
+          echo "NODE_VERSION=$ver" >> "$GITHUB_ENV"
 
       - name: Yarn Berry + CycloneDX (container)
         run: |
