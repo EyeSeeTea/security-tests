@@ -39,7 +39,7 @@ jobs:
               fi
               # CycloneDX rejects invalid package names like "$"; strip for BOM generation only.
               cp package.json /tmp/package.json.orig
-              node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));if(pkg.dependencies&&pkg.dependencies['$']){delete pkg.dependencies['$'];}fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\\n');"
+              node -e "const fs=require(\"fs\");const pkg=JSON.parse(fs.readFileSync(\"package.json\",\"utf8\"));if(pkg.dependencies&&pkg.dependencies[\"\\$\"]){delete pkg.dependencies[\"\\$\"];};fs.writeFileSync(\"package.json\",JSON.stringify(pkg,null,2)+\"\\n\");"
               yarn install
               yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON
               mv /tmp/package.json.orig package.json '
