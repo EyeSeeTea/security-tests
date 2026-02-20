@@ -224,6 +224,15 @@ jobs:
           sarif_file: dtrack-yarn4.sarif
           category: dependency-track-yarn4
 
+      - name: Upload SARIF artifact (yarn4)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtrack-yarn4-sarif
+          path: dtrack-yarn4.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Export VEX and VDR JSON (yarn4)
         env:
           DTRACK_URL: ${{ vars.DTRACK_URL }}
