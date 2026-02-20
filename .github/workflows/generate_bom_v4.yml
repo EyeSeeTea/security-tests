@@ -181,6 +181,43 @@ jobs:
           test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
           jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
 
+      - name: Normalize SARIF for GitHub Code Scanning (yarn4)
+        run: |
+          set -euo pipefail
+
+          jq '
+            .runs |= map(
+              .results |= map(
+                if ((.locations // []) | length) == 0 then
+                  . + {
+                    locations: [{
+                      physicalLocation: {
+                        artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                        region: { startLine: 1 }
+                      }
+                    }]
+                  }
+                else
+                  .locations |= map(
+                    if .physicalLocation then
+                      .
+                    else
+                      . + {
+                        physicalLocation: {
+                          artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                          region: { startLine: 1 }
+                        }
+                      }
+                    end
+                  )
+                end
+              )
+            )
+          ' dtrack-yarn4.sarif > dtrack-yarn4.normalized.sarif
+
+          mv dtrack-yarn4.normalized.sarif dtrack-yarn4.sarif
+          jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-yarn4.sarif >/dev/null
+
       - name: Upload SARIF to GitHub Code Scanning (yarn4)
         uses: github/codeql-action/upload-sarif@v4
         with:

@@ -177,6 +177,43 @@ jobs:
           test -s dtrack-syft.sarif || { echo "::error::dtrack-syft.sarif is missing or empty"; exit 1; }
           jq -e '.runs and (.runs | type == "array")' dtrack-syft.sarif >/dev/null
 
+      - name: Normalize SARIF for GitHub Code Scanning (syft)
+        run: |
+          set -euo pipefail
+
+          jq '
+            .runs |= map(
+              .results |= map(
+                if ((.locations // []) | length) == 0 then
+                  . + {
+                    locations: [{
+                      physicalLocation: {
+                        artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                        region: { startLine: 1 }
+                      }
+                    }]
+                  }
+                else
+                  .locations |= map(
+                    if .physicalLocation then
+                      .
+                    else
+                      . + {
+                        physicalLocation: {
+                          artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                          region: { startLine: 1 }
+                        }
+                      }
+                    end
+                  )
+                end
+              )
+            )
+          ' dtrack-syft.sarif > dtrack-syft.normalized.sarif
+
+          mv dtrack-syft.normalized.sarif dtrack-syft.sarif
+          jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-syft.sarif >/dev/null
+
       - name: Upload SARIF to GitHub Code Scanning (syft)
         uses: github/codeql-action/upload-sarif@v4
         with:
