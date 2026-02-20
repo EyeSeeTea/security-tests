@@ -109,40 +109,6 @@ jobs:
           echo "=== Metrics ==="
           echo "$metrics" | jq '{critical, high, medium, low, unassigned, vulnerabilities, vulnerableComponents, components}'
 
-          crit="$(echo "$metrics" | jq -r '.critical')"
-          high="$(echo "$metrics" | jq -r '.high')"
-          
-          echo "Fetching vulnerabilities for project..."
-          vulns_json="$(curl -sSf "$DTRACK_URL/api/v1/vulnerability/project/$uuid" \
-            -H "X-Api-Key: $DTRACK_API_KEY")"
-          
-          echo "Emitting GitHub Actions annotations..."
-          echo "$vulns_json" | jq -r '
-            map({
-              severity: (.severity // "UNASSIGNED"),
-              id: (.vulnId // .vulnID // .source // "UNKNOWN"),
-              cvss: ((.cvssV3BaseScore // .cvssV2BaseScore // 0) | tonumber),
-              description: (.description // "" | gsub("[\r\n\t]+"; " ") | .[0:160]),
-              components: (.components // [])
-            })
-            | map(if (.components|length)>0 then .components[] as $c | . + {component: ($c.name//"unknown"), version: ($c.version//"")} else . + {component:"unknown", version:""} end)
-            | sort_by(
-                (if .severity=="CRITICAL" then 0
-                 elif .severity=="HIGH" then 1
-                 elif .severity=="MEDIUM" then 2
-                 elif .severity=="LOW" then 3
-                 else 4 end),
-                -(.cvss)
-              )
-            | .[]
-            | "::" + (if .severity=="CRITICAL" or .severity=="HIGH" then "error"
-                      elif .severity=="MEDIUM" then "warning"
-                      else "notice" end) + "::" + .severity + " " + .id
-              + " (CVSS " + (.cvss | tostring) + ") "
-              + .component
-              + (if (.version|length)>0 then "@" + .version else "" end)
-              + " - " + .description
-          '
           crit="$(echo "$metrics" | jq -r '.critical // 0')"
           high="$(echo "$metrics" | jq -r '.high // 0')"
           
@@ -249,7 +215,8 @@ jobs:
           python scripts/update_google_sheet_from_csv.py \
             --spreadsheet-id "$GOOGLE_SPREADSHEET_ID" \
             --sheet-name yarn4 \
-            --csv-path yarn4_vex_vdr.csv
+            --csv-path yarn4_vex_vdr.csv \
+            --report-severities "critical,high"
 
       - name: Report sheet sync (yarn4)
         run: |
@@ -257,24 +224,40 @@ jobs:
 
           appended="${{ steps.sheets_yarn4.outputs.appended }}"
           appended="${appended:-0}"
+          open_critical="${{ steps.sheets_yarn4.outputs.unresolved_critical }}"
+          open_high="${{ steps.sheets_yarn4.outputs.unresolved_high }}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          sheet_url="${{ steps.sheets_yarn4.outputs.sheet_url }}"
 
-          echo "::notice::Yarn4 new entries appended to Google Sheet tab 'yarn4': $appended"
+          echo "::notice::Yarn4 findings summary (Applicable empty): critical=$open_critical high=$open_high"
+          if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
+            echo "::warning::Open findings exist. Review the sheet: $sheet_url"
+          fi
           echo "### Yarn4 sheet sync" >> "$GITHUB_STEP_SUMMARY"
           echo "- Appended rows: $appended" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open critical (Applicable empty): $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open high (Applicable empty): $open_high" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
+            echo "- Sheet URL: $sheet_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- Review tab: yarn4" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce vulnerability gate (critical/high)
         run: |
           set -euo pipefail
 
-          crit="${{ steps.dtrack_yarn4.outputs.critical }}"
-          high="${{ steps.dtrack_yarn4.outputs.high }}"
+          crit="${{ steps.sheets_yarn4.outputs.unresolved_critical }}"
+          high="${{ steps.sheets_yarn4.outputs.unresolved_high }}"
+          crit="${crit:-0}"
+          high="${high:-0}"
+          sheet_url="${{ steps.sheets_yarn4.outputs.sheet_url }}"
 
-          echo "Final gate values: critical=[$crit] high=[$high]"
+          echo "Final unresolved gate values (Applicable empty): critical=[$crit] high=[$high]"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "::error::Found critical/high vulnerabilities (critical=$crit, high=$high)"
+            echo "::error::Found unresolved critical/high findings (critical=$crit, high=$high). Review: $sheet_url"
             exit 1
           fi
 
-          echo "No critical or high vulnerabilities found"
+          echo "No unresolved critical or high findings"
