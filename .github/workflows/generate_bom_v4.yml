@@ -45,6 +45,7 @@ jobs:
               mv /tmp/package.json.orig package.json '
 
       - name: Upload BOM to Dependency-Track and fetch metrics
+        id: dtrack_yarn4
         env:
           DTRACK_URL: ${{ vars.DTRACK_URL }}
           DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
@@ -95,7 +96,12 @@ jobs:
           "$DTRACK_URL/api/v1/project/lookup?name=${projectNameEnc}&version=${projectVersionEnc}" \
           -H "X-Api-Key: $DTRACK_API_KEY")"
 
-          uuid="$(echo "$project" | jq -r '.uuid')"
+          uuid="$(echo "$project" | jq -r '.uuid // empty')"
+          if [ -z "$uuid" ]; then
+            echo "::error::Could not resolve project UUID from Dependency-Track lookup"
+            echo "$project"
+            exit 1
+          fi
           echo "Project UUID: $uuid"
 
           metrics="$(curl -sSf "$DTRACK_URL/api/v1/metrics/project/$uuid/current" -H "X-Api-Key: $DTRACK_API_KEY")"
@@ -137,25 +143,138 @@ jobs:
               + (if (.version|length)>0 then "@" + .version else "" end)
               + " - " + .description
           '
-          # Always print what we are about to enforce
           crit="$(echo "$metrics" | jq -r '.critical // 0')"
           high="$(echo "$metrics" | jq -r '.high // 0')"
           
-          # Trim possible whitespace
-          crit="$(echo "$crit" | tr -d '\r\n ' )"
-          high="$(echo "$high" | tr -d '\r\n ' )"
+          crit="$(echo "$crit" | tr -d '\r\n ')"
+          high="$(echo "$high" | tr -d '\r\n ')"
           
-          echo "Final gate values: critical=[$crit] high=[$high]"
-          
-          # Ensure they are numeric, otherwise fail loud (so you notice immediately)
+          echo "Collected gate values: critical=[$crit] high=[$high]"
+
           if ! [[ "$crit" =~ ^[0-9]+$ ]] || ! [[ "$high" =~ ^[0-9]+$ ]]; then
             echo "::error::Invalid metrics values: critical=[$crit], high=[$high]"
             exit 1
           fi
-          
+
+          echo "project_uuid=$uuid" >> "$GITHUB_OUTPUT"
+          echo "critical=$crit" >> "$GITHUB_OUTPUT"
+          echo "high=$high" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Dependency-Track analysis and wait
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          analysis_token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID/analyze" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+            | jq -r '.token // empty'
+          )"
+
+          if [ -z "$analysis_token" ]; then
+            echo "::error::Dependency-Track analysis token was empty"
+            exit 1
+          fi
+
+          echo "Waiting for Dependency-Track analysis to finish..."
+          processing="true"
+          for i in {1..120}; do
+            processing="$(curl -sSf "$DTRACK_URL/api/v1/event/token/$analysis_token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+            if [ "$processing" = "false" ]; then
+              echo "Analysis finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "::error::Timed out waiting for Dependency-Track analysis"
+            exit 1
+          fi
+
+      - name: Export VEX and VDR JSON (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/vex/cyclonedx/project/$PROJECT_UUID" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o vex_yarn4.json
+
+          curl -sSf "$DTRACK_URL/api/v1/bom/cyclonedx/project/$PROJECT_UUID?variant=vdr&format=JSON" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o bom_yarn4.json
+
+          test -s vex_yarn4.json || { echo "::error::vex_yarn4.json is missing or empty"; exit 1; }
+          test -s bom_yarn4.json || { echo "::error::bom_yarn4.json is missing or empty"; exit 1; }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies for CSV scripts
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      - name: Generate merged CSV (yarn4)
+        run: |
+          set -euo pipefail
+          python scripts/merge_yarn4_vex_vdr_to_csv.py \
+            --vex vex_yarn4.json \
+            --vdr bom_yarn4.json \
+            --output yarn4_vex_vdr.csv
+
+      - name: Update Google Sheets tab (yarn4)
+        id: sheets_yarn4
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SS_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GOOGLE_SPREADSHEET_ID:-}" ]; then
+            echo "::error::Missing vars.GOOGLE_SPREADSHEET_ID"
+            exit 1
+          fi
+
+          python scripts/update_google_sheet_from_csv.py \
+            --spreadsheet-id "$GOOGLE_SPREADSHEET_ID" \
+            --sheet-name yarn4 \
+            --csv-path yarn4_vex_vdr.csv
+
+      - name: Report sheet sync (yarn4)
+        run: |
+          set -euo pipefail
+
+          appended="${{ steps.sheets_yarn4.outputs.appended }}"
+          appended="${appended:-0}"
+
+          echo "::notice::Yarn4 new entries appended to Google Sheet tab 'yarn4': $appended"
+          echo "### Yarn4 sheet sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Appended rows: $appended" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Review tab: yarn4" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce vulnerability gate (critical/high)
+        run: |
+          set -euo pipefail
+
+          crit="${{ steps.dtrack_yarn4.outputs.critical }}"
+          high="${{ steps.dtrack_yarn4.outputs.high }}"
+
+          echo "Final gate values: critical=[$crit] high=[$high]"
+
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
             echo "::error::Found critical/high vulnerabilities (critical=$crit, high=$high)"
             exit 1
           fi
-          
+
           echo "No critical or high vulnerabilities found"
