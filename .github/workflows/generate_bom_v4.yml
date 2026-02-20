@@ -10,6 +10,10 @@ on:
 jobs:
   generatebomv4:
     runs-on: bom
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -160,6 +164,28 @@ jobs:
             echo "::error::Timed out waiting for Dependency-Track analysis"
             exit 1
           fi
+
+      - name: Export SARIF findings (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID?suppressed=false" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -H "Accept: application/sarif+json" \
+            -o dtrack-yarn4.sarif
+
+          test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
+          jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
+
+      - name: Upload SARIF to GitHub Code Scanning (yarn4)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: dtrack-yarn4.sarif
+          category: dependency-track-yarn4
 
       - name: Export VEX and VDR JSON (yarn4)
         env:
