@@ -264,8 +264,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--applicable-column",
-        default="Applicable",
-        help="Column that marks whether a finding has been reviewed.",
+        default="False positive",
+        help="Column that marks whether a finding was identified as false positive.",
     )
     parser.add_argument(
         "--severity-column",
@@ -338,7 +338,7 @@ def main() -> int:
     print(f"Rows appended: {len(rows_to_append)}")
     print(f"Rows skipped (ID already exists): {skipped_existing}")
     print(f"Rows skipped (missing ID): {skipped_missing_id}")
-    print("Unresolved findings (Applicable empty) by selected severity:")
+    print("Unresolved findings (False positive empty) by selected severity:")
     for severity in selected_severities:
         print(f"- {severity}: {unresolved_counts.get(severity, 0)}")
     print(f"Selected unresolved total: {unresolved_selected_total}")

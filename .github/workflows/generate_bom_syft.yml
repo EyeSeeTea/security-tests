@@ -252,14 +252,14 @@ jobs:
           open_high="${open_high:-0}"
           sheet_url="${{ steps.sheets_syft.outputs.sheet_url }}"
 
-          echo "::notice::Syft findings summary (Applicable empty): critical=$open_critical high=$open_high"
+          echo "::notice::Syft findings summary (False positive empty): critical=$open_critical high=$open_high"
           if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
             echo "::warning::Open findings exist. Review the sheet: $sheet_url"
           fi
           echo "### Syft sheet sync" >> "$GITHUB_STEP_SUMMARY"
           echo "- Appended rows: $appended" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Open critical (Applicable empty): $open_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Open high (Applicable empty): $open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open critical (False positive empty): $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open high (False positive empty): $open_high" >> "$GITHUB_STEP_SUMMARY"
           if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
             echo "- Sheet URL: $sheet_url" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -275,7 +275,7 @@ jobs:
           high="${high:-0}"
           sheet_url="${{ steps.sheets_syft.outputs.sheet_url }}"
 
-          echo "Final unresolved gate values (Applicable empty): critical=[$crit] high=[$high]"
+          echo "Final unresolved gate values (False positive empty): critical=[$crit] high=[$high]"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
             echo "::error::Found unresolved critical/high findings (critical=$crit, high=$high). Review: $sheet_url"

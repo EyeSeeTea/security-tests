@@ -11,8 +11,8 @@ DEFAULT_VDR = "bom_yarn4.json"
 DEFAULT_OUTPUT = "yarn4_vex_vdr.csv"
 
 FIXED_COLUMNS = [
-    "Applicable",
-    "Justification",
+    "False positive",
+    "Explanation of false positive",
     "Reviewed by",
     "score",
     "severity",
@@ -267,8 +267,8 @@ def build_rows(
         flat["score"] = "" if score is None else score
         flat["severity"] = "" if sev is None else sev
         flat.update(affected_fields(item, components_map))
-        flat["Applicable"] = ""
-        flat["Justification"] = ""
+        flat["False positive"] = ""
+        flat["Explanation of false positive"] = ""
         flat["Reviewed by"] = ""
         rows.append(flat)
     return rows
