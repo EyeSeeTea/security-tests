@@ -1,0 +1,326 @@
+name: Generate Bom Yarn 4 CycloneDX
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  generatebomv4:
+    runs-on: bom
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read node version (min 20.18.0 for CycloneDX)
+        run: |
+          if [ -f .nvmrc ]; then
+            ver="$(tr -d 'v' < .nvmrc)"
+          else
+            ver="20.18.0"
+          fi
+          min="20.18.0"
+          if [ "$(printf '%s\n' "$ver" "$min" | sort -V | head -n1)" = "$ver" ] && [ "$ver" != "$min" ]; then
+            ver="$min"
+          fi
+          echo "NODE_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Yarn Berry + CycloneDX (container)
+        run: |
+          podman run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            node:${NODE_VERSION}-bullseye \
+            bash -lc '
+              corepack enable
+              yarn set version berry
+              if [ ! -f src/package.json ]; then
+                printf "{\n  \"name\": \"local-src\",\n  \"version\": \"0.0.0\"\n}\n" > src/package.json
+              fi
+              # CycloneDX rejects invalid package names like "$"; strip for BOM generation only.
+              cp package.json /tmp/package.json.orig
+              node -e "const fs=require(\"fs\");const pkg=JSON.parse(fs.readFileSync(\"package.json\",\"utf8\"));if(pkg.dependencies&&pkg.dependencies[\"\\$\"]){delete pkg.dependencies[\"\\$\"];};fs.writeFileSync(\"package.json\",JSON.stringify(pkg,null,2)+\"\\n\");"
+              yarn install
+              yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON
+              mv /tmp/package.json.orig package.json '
+
+      - name: Upload BOM to Dependency-Track and fetch metrics
+        id: dtrack_yarn4
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          test -f bom_berry.json || { echo "bom_berry.json not found"; ls -lah; exit 1; }
+
+          projectName="${GITHUB_REPOSITORY}-berry"
+          if [ -n "${PR_NUMBER:-}" ]; then
+            projectVersion="pr-${PR_NUMBER}"
+          else
+            projectVersion="${GITHUB_REF_NAME:-main}"
+          fi
+
+          token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/bom" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+              -F "projectName=$projectName" \
+              -F "projectVersion=$projectVersion" \
+              -F "autoCreate=true" \
+              -F "bom=@bom_berry.json" \
+            | jq -r '.token'
+          )"
+          echo "Dependency-Track token: $token"
+
+          echo "Waiting for Dependency-Track to finish processing..."
+          processing="true"
+          for i in {1..120}; do
+              processing="$(curl -sSf "$DTRACK_URL/api/v1/bom/token/$token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+              if [ "$processing" = "false" ]; then
+              echo "Processing finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "Timed out waiting for BOM processing"
+            exit 1
+          fi
+          
+          projectNameEnc=$(printf '%s' "$projectName" | jq -sRr @uri)
+          projectVersionEnc=$(printf '%s' "$projectVersion" | jq -sRr @uri)
+
+          project="$(curl -sSf \
+          "$DTRACK_URL/api/v1/project/lookup?name=${projectNameEnc}&version=${projectVersionEnc}" \
+          -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          uuid="$(echo "$project" | jq -r '.uuid // empty')"
+          if [ -z "$uuid" ]; then
+            echo "::error::Could not resolve project UUID from Dependency-Track lookup"
+            echo "$project"
+            exit 1
+          fi
+          echo "Project UUID: $uuid"
+
+          metrics="$(curl -sSf "$DTRACK_URL/api/v1/metrics/project/$uuid/current" -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          echo "=== Metrics ==="
+          echo "$metrics" | jq '{critical, high, medium, low, unassigned, vulnerabilities, vulnerableComponents, components}'
+
+          crit="$(echo "$metrics" | jq -r '.critical // 0')"
+          high="$(echo "$metrics" | jq -r '.high // 0')"
+          
+          crit="$(echo "$crit" | tr -d '\r\n ')"
+          high="$(echo "$high" | tr -d '\r\n ')"
+          
+          echo "Collected gate values: critical=[$crit] high=[$high]"
+
+          if ! [[ "$crit" =~ ^[0-9]+$ ]] || ! [[ "$high" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid metrics values: critical=[$crit], high=[$high]"
+            exit 1
+          fi
+
+          echo "project_uuid=$uuid" >> "$GITHUB_OUTPUT"
+          echo "critical=$crit" >> "$GITHUB_OUTPUT"
+          echo "high=$high" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Dependency-Track analysis and wait
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          analysis_token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID/analyze" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+            | jq -r '.token // empty'
+          )"
+
+          if [ -z "$analysis_token" ]; then
+            echo "::error::Dependency-Track analysis token was empty"
+            exit 1
+          fi
+
+          echo "Waiting for Dependency-Track analysis to finish..."
+          processing="true"
+          for i in {1..120}; do
+            processing="$(curl -sSf "$DTRACK_URL/api/v1/event/token/$analysis_token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+            if [ "$processing" = "false" ]; then
+              echo "Analysis finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "::error::Timed out waiting for Dependency-Track analysis"
+            exit 1
+          fi
+
+      - name: Export SARIF findings (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID?suppressed=false" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -H "Accept: application/sarif+json" \
+            -o dtrack-yarn4.sarif
+
+          test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
+          jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
+
+      - name: Normalize SARIF for GitHub Code Scanning (yarn4)
+        run: |
+          set -euo pipefail
+
+          jq '
+            .runs |= map(
+              .results |= map(
+                if ((.locations // []) | length) == 0 then
+                  . + {
+                    locations: [{
+                      physicalLocation: {
+                        artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                        region: { startLine: 1 }
+                      }
+                    }]
+                  }
+                else
+                  .locations |= map(
+                    if .physicalLocation then
+                      .
+                    else
+                      . + {
+                        physicalLocation: {
+                          artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
+                          region: { startLine: 1 }
+                        }
+                      }
+                    end
+                  )
+                end
+              )
+            )
+          ' dtrack-yarn4.sarif > dtrack-yarn4.normalized.sarif
+
+          mv dtrack-yarn4.normalized.sarif dtrack-yarn4.sarif
+          jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-yarn4.sarif >/dev/null
+
+      - name: Upload SARIF to GitHub Code Scanning (yarn4)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: dtrack-yarn4.sarif
+          category: dependency-track-yarn4
+
+      - name: Export VEX and VDR JSON (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/vex/cyclonedx/project/$PROJECT_UUID" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o vex_yarn4.json
+
+          curl -sSf "$DTRACK_URL/api/v1/bom/cyclonedx/project/$PROJECT_UUID?variant=vdr&format=JSON" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o bom_yarn4.json
+
+          test -s vex_yarn4.json || { echo "::error::vex_yarn4.json is missing or empty"; exit 1; }
+          test -s bom_yarn4.json || { echo "::error::bom_yarn4.json is missing or empty"; exit 1; }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies for CSV scripts
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      - name: Generate merged CSV (yarn4)
+        run: |
+          set -euo pipefail
+          python scripts/merge_yarn4_vex_vdr_to_csv.py \
+            --vex vex_yarn4.json \
+            --vdr bom_yarn4.json \
+            --output yarn4_vex_vdr.csv
+
+      - name: Update Google Sheets tab (yarn4)
+        id: sheets_yarn4
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SS_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SS_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GOOGLE_SPREADSHEET_ID:-}" ]; then
+            echo "::error::Missing vars.GOOGLE_SPREADSHEET_ID"
+            exit 1
+          fi
+
+          python scripts/update_google_sheet_from_csv.py \
+            --spreadsheet-id "$GOOGLE_SPREADSHEET_ID" \
+            --sheet-name yarn4 \
+            --csv-path yarn4_vex_vdr.csv \
+            --report-severities "critical,high"
+
+      - name: Report sheet sync (yarn4)
+        run: |
+          set -euo pipefail
+
+          appended="${{ steps.sheets_yarn4.outputs.appended }}"
+          appended="${appended:-0}"
+          open_critical="${{ steps.sheets_yarn4.outputs.unresolved_critical }}"
+          open_high="${{ steps.sheets_yarn4.outputs.unresolved_high }}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          sheet_url="${{ steps.sheets_yarn4.outputs.sheet_url }}"
+
+          echo "::notice::Yarn4 findings summary (False positive empty): critical=$open_critical high=$open_high"
+          if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
+            echo "::warning::Open findings exist. Review the sheet: $sheet_url"
+          fi
+          echo "### Yarn4 sheet sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Appended rows: $appended" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open critical (False positive empty): $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open high (False positive empty): $open_high" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$open_critical" -gt 0 ] || [ "$open_high" -gt 0 ]; then
+            echo "- Sheet URL: $sheet_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- Review tab: yarn4" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce vulnerability gate (critical/high)
+        run: |
+          set -euo pipefail
+
+          crit="${{ steps.sheets_yarn4.outputs.unresolved_critical }}"
+          high="${{ steps.sheets_yarn4.outputs.unresolved_high }}"
+          crit="${crit:-0}"
+          high="${high:-0}"
+          sheet_url="${{ steps.sheets_yarn4.outputs.sheet_url }}"
+
+          echo "Final unresolved gate values (False positive empty): critical=[$crit] high=[$high]"
+
+          if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "::error::Found unresolved critical/high findings (critical=$crit, high=$high). Review: $sheet_url"
+            exit 1
+          fi
+
+          echo "No unresolved critical or high findings"
