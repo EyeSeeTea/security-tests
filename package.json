@@ -68,6 +68,7 @@
         "graceful-fs": "^4.2.11",
         "husky": "7.0.4",
         "jsdom": "^21.1.1",
+        "minimist": "0.0.8",
         "node-stdlib-browser": "^1.2.0",
         "prettier": "^2.8.7",
         "sanitize-filename": "^1.6.3",
