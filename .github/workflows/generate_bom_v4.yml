@@ -309,15 +309,14 @@ jobs:
           category: dependency-track-yarn4-test
 
       # Computes two metrics:
-      # 1) introduced_vs_base: open(head) - open(base) for gating PR risk.
-      # 2) new_this_run: open(after upload) - open(before upload) for run-level visibility.
+      # 1) open_unresolved: currently open alerts in the scanned ref.
+      # 2) newly_introduced_this_run: open(after upload) - open(before upload).
       - name: Compute code scanning deltas after SARIF upload (yarn4, high/critical)
         id: code_scanning_yarn4
         env:
           GH_TOKEN: ${{ github.token }}
           TOOL_NAME: OWASP Dependency-Track (yarn4-test)
           HEAD_REF: ${{ steps.code_scanning_before_yarn4.outputs.head_ref }}
-          BASE_REF: ${{ steps.code_scanning_before_yarn4.outputs.base_ref }}
           BRANCH_NAME: ${{ steps.code_scanning_before_yarn4.outputs.branch_name }}
         run: |
           set -euo pipefail
@@ -347,7 +346,7 @@ jobs:
             done | sed '/^$/d' | sort -n -u
           }
 
-          count_diff() {
+          list_diff() {
             local left="$1"
             local right="$2"
             local left_file right_file
@@ -355,90 +354,103 @@ jobs:
             right_file="$(mktemp)"
             printf '%s\n' "$left" | sed '/^$/d' | sort -n -u > "$left_file"
             printf '%s\n' "$right" | sed '/^$/d' | sort -n -u > "$right_file"
-            comm -23 "$left_file" "$right_file" | sed '/^$/d' | wc -l | tr -d ' '
+            comm -23 "$left_file" "$right_file" | sed '/^$/d'
             rm -f "$left_file" "$right_file"
+          }
+
+          count_list() {
+            printf '%s\n' "$1" | sed '/^$/d' | wc -l | tr -d ' '
           }
 
           after_critical="$(fetch_alert_numbers "$HEAD_REF" "critical" || true)"
           after_high="$(fetch_alert_numbers "$HEAD_REF" "high" || true)"
-          base_critical="$(fetch_alert_numbers "$BASE_REF" "critical" || true)"
-          base_high="$(fetch_alert_numbers "$BASE_REF" "high" || true)"
-
           before_critical="$(cat "$RUNNER_TEMP/dtrack_yarn4_before_critical.txt" 2>/dev/null || true)"
           before_high="$(cat "$RUNNER_TEMP/dtrack_yarn4_before_high.txt" 2>/dev/null || true)"
 
-          introduced_critical="$(count_diff "$after_critical" "$base_critical")"
-          introduced_high="$(count_diff "$after_high" "$base_high")"
-          introduced_total=$((introduced_critical + introduced_high))
+          open_critical="$(count_list "$after_critical")"
+          open_high="$(count_list "$after_high")"
+          open_total=$((open_critical + open_high))
 
-          new_this_run_critical="$(count_diff "$after_critical" "$before_critical")"
-          new_this_run_high="$(count_diff "$after_high" "$before_high")"
-          new_this_run_total=$((new_this_run_critical + new_this_run_high))
+          new_critical_ids="$(list_diff "$after_critical" "$before_critical" || true)"
+          new_high_ids="$(list_diff "$after_high" "$before_high" || true)"
+          new_critical="$(count_list "$new_critical_ids")"
+          new_high="$(count_list "$new_high_ids")"
+          new_total=$((new_critical + new_high))
+          new_critical_csv="$(printf '%s\n' "$new_critical_ids" | sed '/^$/d' | paste -sd, -)"
+          new_high_csv="$(printf '%s\n' "$new_high_ids" | sed '/^$/d' | paste -sd, -)"
 
           query="is:open branch:${BRANCH_NAME} tool:\"${TOOL_NAME}\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(urlencode "$query")"
 
           echo "Head ref: $HEAD_REF"
-          echo "Base ref: $BASE_REF"
-          echo "Introduced vs base (critical/high/total): $introduced_critical/$introduced_high/$introduced_total"
-          echo "New in this run (critical/high/total): $new_this_run_critical/$new_this_run_high/$new_this_run_total"
+          echo "Open unresolved (critical/high/total): $open_critical/$open_high/$open_total"
+          echo "Newly introduced this run (critical/high/total): $new_critical/$new_high/$new_total"
+          echo "New critical alert numbers this run: ${new_critical_csv:-none}"
+          echo "New high alert numbers this run: ${new_high_csv:-none}"
           echo "Branch code scanning URL: $branch_url"
 
           {
-            echo "introduced_critical=$introduced_critical"
-            echo "introduced_high=$introduced_high"
-            echo "introduced_total=$introduced_total"
-            echo "new_this_run_critical=$new_this_run_critical"
-            echo "new_this_run_high=$new_this_run_high"
-            echo "new_this_run_total=$new_this_run_total"
+            echo "open_critical=$open_critical"
+            echo "open_high=$open_high"
+            echo "open_total=$open_total"
+            echo "new_critical=$new_critical"
+            echo "new_high=$new_high"
+            echo "new_total=$new_total"
+            echo "new_critical_ids_csv=$new_critical_csv"
+            echo "new_high_ids_csv=$new_high_csv"
             echo "branch_url=$branch_url"
             echo "head_ref=$HEAD_REF"
-            echo "base_ref=$BASE_REF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Report code scanning summary (yarn4)
         run: |
           set -euo pipefail
 
-          introduced_critical="${{ steps.code_scanning_yarn4.outputs.introduced_critical }}"
-          introduced_high="${{ steps.code_scanning_yarn4.outputs.introduced_high }}"
-          introduced_total="${{ steps.code_scanning_yarn4.outputs.introduced_total }}"
-          new_this_run_critical="${{ steps.code_scanning_yarn4.outputs.new_this_run_critical }}"
-          new_this_run_high="${{ steps.code_scanning_yarn4.outputs.new_this_run_high }}"
-          new_this_run_total="${{ steps.code_scanning_yarn4.outputs.new_this_run_total }}"
+          open_critical="${{ steps.code_scanning_yarn4.outputs.open_critical }}"
+          open_high="${{ steps.code_scanning_yarn4.outputs.open_high }}"
+          open_total="${{ steps.code_scanning_yarn4.outputs.open_total }}"
+          new_critical="${{ steps.code_scanning_yarn4.outputs.new_critical }}"
+          new_high="${{ steps.code_scanning_yarn4.outputs.new_high }}"
+          new_total="${{ steps.code_scanning_yarn4.outputs.new_total }}"
           branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
-          introduced_critical="${introduced_critical:-0}"
-          introduced_high="${introduced_high:-0}"
-          introduced_total="${introduced_total:-0}"
-          new_this_run_critical="${new_this_run_critical:-0}"
-          new_this_run_high="${new_this_run_high:-0}"
-          new_this_run_total="${new_this_run_total:-0}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          open_total="${open_total:-0}"
+          new_critical="${new_critical:-0}"
+          new_high="${new_high:-0}"
+          new_total="${new_total:-0}"
 
-          echo "::notice::Yarn4 alerts: introduced_vs_base critical=$introduced_critical high=$introduced_high | new_this_run critical=$new_this_run_critical high=$new_this_run_high"
+          echo "::notice::Yarn4 alerts: open_unresolved critical=$open_critical high=$open_high | new_this_run critical=$new_critical high=$new_high"
           echo "### Yarn4 code scanning" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced vs base critical alerts: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced vs base high alerts: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced vs base total alerts: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- New in this run critical alerts: $new_this_run_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "- New in this run high alerts: $new_this_run_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "- New in this run total alerts: $new_this_run_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved critical alerts: $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved high alerts: $open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved total alerts: $open_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced critical alerts (this run): $new_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced high alerts (this run): $new_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced total alerts (this run): $new_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce introduced vulnerability gate (critical/high)
+      - name: Enforce newly introduced vulnerability gate (critical/high)
         run: |
           set -euo pipefail
 
-          crit="${{ steps.code_scanning_yarn4.outputs.introduced_critical }}"
-          high="${{ steps.code_scanning_yarn4.outputs.introduced_high }}"
+          crit="${{ steps.code_scanning_yarn4.outputs.new_critical }}"
+          high="${{ steps.code_scanning_yarn4.outputs.new_high }}"
+          new_crit_ids="${{ steps.code_scanning_yarn4.outputs.new_critical_ids_csv }}"
+          new_high_ids="${{ steps.code_scanning_yarn4.outputs.new_high_ids_csv }}"
           crit="${crit:-0}"
           high="${high:-0}"
+          new_crit_ids="${new_crit_ids:-}"
+          new_high_ids="${new_high_ids:-}"
           branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
 
-          echo "Final gate values (introduced vs base): critical=[$crit] high=[$high]"
+          echo "Final gate values (newly introduced this run): critical=[$crit] high=[$high]"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "::error::Found introduced-vs-base critical/high code scanning alerts (critical=$crit, high=$high). Review: $branch_url"
+            echo "New critical alert numbers this run: ${new_crit_ids:-none}"
+            echo "New high alert numbers this run: ${new_high_ids:-none}"
+            echo "::error::Found newly introduced critical/high code scanning alerts in this run (critical=$crit, high=$high). Review: $branch_url"
             exit 1
           fi
 
-          echo "No introduced critical or high alerts"
+          echo "No newly introduced critical or high alerts in this run"
