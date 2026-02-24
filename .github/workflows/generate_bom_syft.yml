@@ -3,9 +3,12 @@ name: Syft SBOM Runner
 on:
   workflow_dispatch:
   pull_request:
-  push:
-    branches:
-      - '**'
+    types:
+      - opened
+
+concurrency:
+  group: dtrack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   generatebom:
@@ -222,22 +225,96 @@ jobs:
           echo "First 5 rule IDs:"
           jq -r '.runs[0].results[0:5][] | .ruleId' dtrack-syft.sarif
 
-      - name: Upload SARIF to GitHub Code Scanning (syft)
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: dtrack-syft.sarif
-          category: dependency-track-syft-test
-
-      # Compares open alerts on head vs base and counts only the high/critical alerts
-      # that exist in head but not in base (introduced by this branch/PR).
-      - name: Detect Newly Introduced Code Scanning Alerts (syft, high/critical)
-        id: code_scanning_syft
+      - name: Snapshot open code scanning alerts before SARIF upload (syft)
+        id: code_scanning_before_syft
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.base_ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           TOOL_NAME: OWASP Dependency-Track (syft-test)
+        run: |
+          set -euo pipefail
+
+          urlencode() {
+            jq -rn --arg value "$1" '$value|@uri'
+          }
+
+          fetch_alert_numbers() {
+            local ref="$1"
+            local severity="$2"
+            local encoded_ref encoded_tool page response count
+            encoded_ref="$(urlencode "$ref")"
+            encoded_tool="$(urlencode "$TOOL_NAME")"
+            page=1
+            while :; do
+              response="$(curl -fsSL \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=$encoded_tool&severity=$severity&ref=$encoded_ref&per_page=100&page=$page")"
+              count="$(echo "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
+                break
+              fi
+              echo "$response" | jq -r '.[].number'
+              page=$((page + 1))
+            done | sed '/^$/d' | sort -n -u
+          }
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "${PR_NUMBER:-}" ]; then
+            head_ref="refs/pull/${PR_NUMBER}/merge"
+            base_ref="refs/heads/${BASE_REF}"
+            branch_name="${GITHUB_HEAD_REF}"
+          else
+            head_ref="refs/heads/${GITHUB_REF_NAME}"
+            base_ref="refs/heads/${DEFAULT_BRANCH:-main}"
+            branch_name="${GITHUB_REF_NAME}"
+          fi
+
+          before_critical="$(fetch_alert_numbers "$head_ref" "critical" || true)"
+          before_high="$(fetch_alert_numbers "$head_ref" "high" || true)"
+
+          before_critical_file="$RUNNER_TEMP/dtrack_syft_before_critical.txt"
+          before_high_file="$RUNNER_TEMP/dtrack_syft_before_high.txt"
+          printf '%s\n' "$before_critical" | sed '/^$/d' | sort -n -u > "$before_critical_file"
+          printf '%s\n' "$before_high" | sed '/^$/d' | sort -n -u > "$before_high_file"
+
+          before_critical_count="$(wc -l < "$before_critical_file" | tr -d ' ')"
+          before_high_count="$(wc -l < "$before_high_file" | tr -d ' ')"
+          before_total_count=$((before_critical_count + before_high_count))
+
+          echo "Head ref: $head_ref"
+          echo "Base ref: $base_ref"
+          echo "Before upload open critical alerts: $before_critical_count"
+          echo "Before upload open high alerts: $before_high_count"
+          echo "Before upload open total alerts: $before_total_count"
+
+          {
+            echo "head_ref=$head_ref"
+            echo "base_ref=$base_ref"
+            echo "branch_name=$branch_name"
+            echo "before_critical_count=$before_critical_count"
+            echo "before_high_count=$before_high_count"
+            echo "before_total_count=$before_total_count"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF to GitHub Code Scanning (syft)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: dtrack-syft.sarif
+          category: dependency-track-syft-test
+
+      # Computes two metrics:
+      # 1) introduced_vs_base: open(head) - open(base) for gating PR risk.
+      # 2) new_this_run: open(after upload) - open(before upload) for run-level visibility.
+      - name: Compute code scanning deltas after SARIF upload (syft, high/critical)
+        id: code_scanning_syft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (syft-test)
+          HEAD_REF: ${{ steps.code_scanning_before_syft.outputs.head_ref }}
+          BASE_REF: ${{ steps.code_scanning_before_syft.outputs.base_ref }}
+          BRANCH_NAME: ${{ steps.code_scanning_before_syft.outputs.branch_name }}
         run: |
           set -euo pipefail
 
@@ -278,42 +355,41 @@ jobs:
             rm -f "$left_file" "$right_file"
           }
 
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "${PR_NUMBER:-}" ]; then
-            head_ref="refs/pull/${PR_NUMBER}/merge"
-            base_ref="refs/heads/${BASE_REF}"
-            branch_name="${GITHUB_HEAD_REF}"
-          else
-            head_ref="refs/heads/${GITHUB_REF_NAME}"
-            base_ref="refs/heads/${DEFAULT_BRANCH:-main}"
-            branch_name="${GITHUB_REF_NAME}"
-          fi
+          after_critical="$(fetch_alert_numbers "$HEAD_REF" "critical" || true)"
+          after_high="$(fetch_alert_numbers "$HEAD_REF" "high" || true)"
+          base_critical="$(fetch_alert_numbers "$BASE_REF" "critical" || true)"
+          base_high="$(fetch_alert_numbers "$BASE_REF" "high" || true)"
 
-          head_critical="$(fetch_alert_numbers "$head_ref" "critical" || true)"
-          head_high="$(fetch_alert_numbers "$head_ref" "high" || true)"
-          base_critical="$(fetch_alert_numbers "$base_ref" "critical" || true)"
-          base_high="$(fetch_alert_numbers "$base_ref" "high" || true)"
+          before_critical="$(cat "$RUNNER_TEMP/dtrack_syft_before_critical.txt" 2>/dev/null || true)"
+          before_high="$(cat "$RUNNER_TEMP/dtrack_syft_before_high.txt" 2>/dev/null || true)"
 
-          introduced_critical="$(count_diff "$head_critical" "$base_critical")"
-          introduced_high="$(count_diff "$head_high" "$base_high")"
+          introduced_critical="$(count_diff "$after_critical" "$base_critical")"
+          introduced_high="$(count_diff "$after_high" "$base_high")"
           introduced_total=$((introduced_critical + introduced_high))
 
-          query="is:open branch:${branch_name} tool:\"${TOOL_NAME}\""
+          new_this_run_critical="$(count_diff "$after_critical" "$before_critical")"
+          new_this_run_high="$(count_diff "$after_high" "$before_high")"
+          new_this_run_total=$((new_this_run_critical + new_this_run_high))
+
+          query="is:open branch:${BRANCH_NAME} tool:\"${TOOL_NAME}\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(urlencode "$query")"
 
-          echo "Head ref: $head_ref"
-          echo "Base ref: $base_ref"
-          echo "Introduced critical alerts: $introduced_critical"
-          echo "Introduced high alerts: $introduced_high"
-          echo "Introduced total alerts: $introduced_total"
+          echo "Head ref: $HEAD_REF"
+          echo "Base ref: $BASE_REF"
+          echo "Introduced vs base (critical/high/total): $introduced_critical/$introduced_high/$introduced_total"
+          echo "New in this run (critical/high/total): $new_this_run_critical/$new_this_run_high/$new_this_run_total"
           echo "Branch code scanning URL: $branch_url"
 
           {
             echo "introduced_critical=$introduced_critical"
             echo "introduced_high=$introduced_high"
             echo "introduced_total=$introduced_total"
+            echo "new_this_run_critical=$new_this_run_critical"
+            echo "new_this_run_high=$new_this_run_high"
+            echo "new_this_run_total=$new_this_run_total"
             echo "branch_url=$branch_url"
-            echo "head_ref=$head_ref"
-            echo "base_ref=$base_ref"
+            echo "head_ref=$HEAD_REF"
+            echo "base_ref=$BASE_REF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Report code scanning summary (syft)
@@ -323,16 +399,25 @@ jobs:
           introduced_critical="${{ steps.code_scanning_syft.outputs.introduced_critical }}"
           introduced_high="${{ steps.code_scanning_syft.outputs.introduced_high }}"
           introduced_total="${{ steps.code_scanning_syft.outputs.introduced_total }}"
+          new_this_run_critical="${{ steps.code_scanning_syft.outputs.new_this_run_critical }}"
+          new_this_run_high="${{ steps.code_scanning_syft.outputs.new_this_run_high }}"
+          new_this_run_total="${{ steps.code_scanning_syft.outputs.new_this_run_total }}"
           branch_url="${{ steps.code_scanning_syft.outputs.branch_url }}"
           introduced_critical="${introduced_critical:-0}"
           introduced_high="${introduced_high:-0}"
           introduced_total="${introduced_total:-0}"
+          new_this_run_critical="${new_this_run_critical:-0}"
+          new_this_run_high="${new_this_run_high:-0}"
+          new_this_run_total="${new_this_run_total:-0}"
 
-          echo "::notice::Syft introduced alerts in current ref: critical=$introduced_critical high=$introduced_high"
+          echo "::notice::Syft alerts: introduced_vs_base critical=$introduced_critical high=$introduced_high | new_this_run critical=$new_this_run_critical high=$new_this_run_high"
           echo "### Syft code scanning" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced critical alerts: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced high alerts: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced total alerts: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced vs base critical alerts: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced vs base high alerts: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced vs base total alerts: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New in this run critical alerts: $new_this_run_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New in this run high alerts: $new_this_run_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New in this run total alerts: $new_this_run_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce introduced vulnerability gate (critical/high)
@@ -345,10 +430,10 @@ jobs:
           high="${high:-0}"
           branch_url="${{ steps.code_scanning_syft.outputs.branch_url }}"
 
-          echo "Final introduced gate values: critical=[$crit] high=[$high]"
+          echo "Final gate values (introduced vs base): critical=[$crit] high=[$high]"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "::error::Found introduced critical/high code scanning alerts (critical=$crit, high=$high). Review: $branch_url"
+            echo "::error::Found introduced-vs-base critical/high code scanning alerts (critical=$crit, high=$high). Review: $branch_url"
             exit 1
           fi
 
