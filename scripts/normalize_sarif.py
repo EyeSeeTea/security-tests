@@ -10,6 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_TOOL_PREFIX = "OWASP Dependency-Track"
 DEFAULT_FALLBACK_URI = "package.json"
 DEFAULT_FALLBACK_LINE = 2
+# GitHub truncates long fullDescription content in the UI, so we keep both:
+# - result header summary
+# - rule.fullDescription
+# to the same short preview length.
 DEFAULT_SUMMARY_MAX_LEN = 180
 URI_BASE_ID = "%SRCROOT%"
 
@@ -440,9 +444,12 @@ def normalize_sarif(
             set_rule_text(rule, "shortDescription", f"[{source}] {str(base_short)}")
             full_text = f"[{source}] {original_rule_id}"
             if has_text(rule_detail):
-                full_text += f"\n{rule_detail}"
+                rule_summary = clean_summary(rule_detail)
+                if not has_text(rule_summary):
+                    rule_summary = rule_detail
+                full_text += f"\n\n{truncate_summary(rule_summary, summary_max_len)}"
             if help_url:
-                full_text += f"\nReference: {help_url}"
+                full_text += f"\n\nReference: {help_url}"
             set_rule_text(rule, "fullDescription", full_text)
             if help_url:
                 rule["helpUri"] = help_url
@@ -626,9 +633,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--summary-max-len",
+        dest="summary_max_len",
         type=int,
         default=DEFAULT_SUMMARY_MAX_LEN,
-        help=f"Maximum summary length in result.message.text. Default: {DEFAULT_SUMMARY_MAX_LEN}.",
+        help=(
+            "Maximum summary length used in result.message header and "
+            f"rule.fullDescription.text. Default: {DEFAULT_SUMMARY_MAX_LEN}."
+        ),
     )
     parser.add_argument(
         "--pretty-indent",
@@ -684,6 +695,7 @@ def main() -> int:
             f"Rule ID namespace: {args.rule_id_namespace if has_text(args.rule_id_namespace) else '<none>'}"
         )
         print(f"Location mode: {args.location_mode}")
+        print(f"Summary max len: {args.summary_max_len}")
         print(f"Runs processed: {run_count}")
         print(f"Rules updated: {updated_rules}")
         print(f"Results updated: {updated_results}")
