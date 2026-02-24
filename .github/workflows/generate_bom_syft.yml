@@ -200,11 +200,21 @@ jobs:
           test -s vex_syft.json || { echo "::error::vex_syft.json is missing or empty"; exit 1; }
           test -s vdr_syft.json || { echo "::error::vdr_syft.json is missing or empty"; exit 1; }
 
+      - name: Download normalize_sarif.py (shared script)
+        env:
+          NORMALIZE_SARIF_URL: https://raw.githubusercontent.com/EyeSeeTea/security-tests/feature/dependanbot-actions/scripts/normalize_sarif.py
+        run: |
+          set -euo pipefail
+
+          mkdir -p .dtrack-tools
+          curl -fsSL "$NORMALIZE_SARIF_URL" -o .dtrack-tools/normalize_sarif.py
+          python3 -m py_compile .dtrack-tools/normalize_sarif.py
+
       - name: Normalize SARIF for GitHub Code Scanning (syft)
         run: |
           set -euo pipefail
 
-          python3 scripts/normalize_sarif.py \
+          python3 .dtrack-tools/normalize_sarif.py \
             --input-sarif dtrack-syft.sarif \
             --output-sarif dtrack-syft.sarif \
             --vdr vdr_syft.json \
