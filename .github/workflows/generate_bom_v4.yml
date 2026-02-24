@@ -452,7 +452,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: dtrack-yarn4.sarif
-          category: dependency-track-yarn4
+          category: dependency-track-yarn4-test
 
       - name: Compute introduced code scanning alerts (yarn4, high/critical)
         id: code_scanning_yarn4
