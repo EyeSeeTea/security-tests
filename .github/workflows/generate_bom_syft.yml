@@ -322,7 +322,9 @@ jobs:
               .tool.driver.name = "OWASP Dependency-Track (syft-test)"
               | .tool.driver.rules |= map(
                   (.id // "Dependency-Track finding") as $rule_id
+                  | ("syft-test::" + ($rule_id | tostring)) as $namespaced_rule_id
                   | (advisory_url($rule_id; $url_by_rule; (.helpUri // null))) as $help_url
+                  | .id = $namespaced_rule_id
                   | .shortDescription.text = ("[syft-test] " + ((.shortDescription.text // .id // "Dependency-Track finding") | tostring))
                   | .fullDescription.text = ("[syft-test] " + ($rule_id | tostring))
                   | if has_text($help_url) then
@@ -334,6 +336,7 @@ jobs:
               | .results |= map(
                   . as $result
                   | (.ruleId // "Dependency-Track finding") as $rule_id
+                  | ("syft-test::" + ($rule_id | tostring)) as $namespaced_rule_id
                   | (advisory_url($rule_id; $url_by_rule; null)) as $help_url
                   | (.properties.name // "unknown-package") as $package_name
                   | (.properties.version // "") as $package_version
@@ -346,9 +349,11 @@ jobs:
                   | .properties = (
                       (.properties // {})
                       + { scan_source: "syft-test" }
+                      + { original_rule_id: ($rule_id | tostring) }
                       + (if has_text($help_url) then { advisory_url: $help_url } else {} end)
                       + (if has_text($raw_detail) then { advisory_detail: $raw_detail } else {} end)
                     )
+                  | .ruleId = $namespaced_rule_id
                   | .message.text = (
                       "[syft-test] "
                       + ($rule_id | tostring)
@@ -443,6 +448,14 @@ jobs:
 
           mv dtrack-syft.normalized.sarif dtrack-syft.sarif
           jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-syft.sarif >/dev/null
+
+      - name: Debug normalized SARIF identity (syft)
+        run: |
+          set -euo pipefail
+          echo "Tool name:"
+          jq -r '.runs[0].tool.driver.name' dtrack-syft.sarif
+          echo "First 5 rule IDs:"
+          jq -r '.runs[0].results[0:5][] | .ruleId' dtrack-syft.sarif
 
       - name: Upload SARIF to GitHub Code Scanning (syft)
         uses: github/codeql-action/upload-sarif@v4
