@@ -181,37 +181,176 @@ jobs:
           test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
           jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
 
+      - name: Export VDR JSON for SARIF location mapping (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/bom/cyclonedx/project/$PROJECT_UUID?variant=vdr&format=JSON" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o bom_yarn4_for_sarif.json
+
+          test -s bom_yarn4_for_sarif.json || { echo "::error::bom_yarn4_for_sarif.json is missing or empty"; exit 1; }
+
       - name: Normalize SARIF for GitHub Code Scanning (yarn4)
         run: |
           set -euo pipefail
 
-          jq '
-            .runs |= map(
-              .results |= map(
-                if ((.locations // []) | length) == 0 then
-                  . + {
-                    locations: [{
-                      physicalLocation: {
-                        artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
-                        region: { startLine: 1 }
-                      }
-                    }]
-                  }
-                else
-                  .locations |= map(
-                    if .physicalLocation then
-                      .
+          jq --slurpfile vdr bom_yarn4_for_sarif.json '
+            def to_num:
+              if . == null then null
+              elif type == "number" then .
+              elif type == "string" then
+                (if test("^[0-9]+(\\.[0-9]+)?$") then tonumber else null end)
+              else null end;
+
+            def score_from_result:
+              (
+                (.properties.cvssV3BaseScore // null | to_num)
+                //
+                ((.properties.severityRank // null | to_num) as $rank |
+                  if $rank == 0 then 9.0
+                  elif $rank == 1 then 8.0
+                  elif $rank == 2 then 5.0
+                  elif $rank == 3 then 2.0
+                  else null
+                  end)
+              );
+
+            def normalize_path:
+              tostring | gsub("\\\\"; "/") | sub("^/+"; "");
+
+            def component_paths($component):
+              (
+                [ ($component.properties // [])[]?
+                  | select(type == "object")
+                  | select((.name // "") | type == "string")
+                  | select((.name | startswith("syft:location:")) and (.name | endswith(":path")))
+                  | (.value // empty)
+                  | tostring
+                  | normalize_path
+                  | select(length > 0)
+                ]
+                +
+                [ ($component.evidence.occurrences // [])[]?
+                  | .location?
+                  | select(type == "string")
+                  | normalize_path
+                  | select(length > 0)
+                ]
+              );
+
+            def purl_to_path_map($bom):
+              reduce (($bom.components // [])[]? | select(type == "object")) as $component
+                ({};
+                  (component_paths($component) | .[0]) as $path
+                  | if $path == null then .
                     else
-                      . + {
-                        physicalLocation: {
-                          artifactLocation: { uri: "package.json", uriBaseId: "%SRCROOT%" },
-                          region: { startLine: 1 }
-                        }
-                      }
+                      .
+                      + (if (($component.purl // "") | tostring | length) > 0 then { (($component.purl | tostring)): $path } else {} end)
+                      + (if (($component["bom-ref"] // "") | tostring | length) > 0 then { (($component["bom-ref"] | tostring)): $path } else {} end)
                     end
+                );
+
+            def has_text($value):
+              $value != null and (($value | tostring) | length) > 0;
+
+            (purl_to_path_map(($vdr[0] // {}))) as $purl_path
+            |
+            .runs |= map(
+              .tool.driver.name = "OWASP Dependency-Track (yarn4)"
+              | .tool.driver.rules |= map(
+                  .shortDescription.text = ("[yarn4] " + ((.shortDescription.text // .id // "Dependency-Track finding") | tostring))
+                )
+              | .results |= map(
+                  . as $result
+                  | (score_from_result) as $score
+                  | (.locations[0].logicalLocations[0].fullyQualifiedName // "") as $logical_key
+                  | ($purl_path[$logical_key] // null) as $mapped_path
+                  | .properties = ((.properties // {}) + { scan_source: "yarn4" })
+                  | .partialFingerprints = ((.partialFingerprints // {}) + {
+                      dtrack_finding_key: (
+                        [
+                          "yarn4",
+                          (.ruleId // ""),
+                          (.properties.name // ""),
+                          (.properties.group // ""),
+                          (.properties.version // ""),
+                          (.locations[0].logicalLocations[0].fullyQualifiedName // "")
+                        ] | map(tostring) | join("|")
+                      )
+                    })
+                  | .level = (
+                      if $score == null then (.level // "warning")
+                      elif $score >= 7.0 then "error"
+                      elif $score >= 4.0 then "warning"
+                      else "note"
+                      end
+                    )
+                  | if ((.locations // []) | length) == 0 then
+                      . + {
+                        locations: [{
+                          logicalLocations: [{ fullyQualifiedName: (if has_text($logical_key) then $logical_key else (.properties.name // "dependency-track") end) }],
+                          physicalLocation: {
+                            artifactLocation: {
+                              uri: (if has_text($mapped_path) then $mapped_path else "package.json" end),
+                              uriBaseId: "%SRCROOT%"
+                            },
+                            region: { startLine: (if has_text($mapped_path) then 1 else 2 end) }
+                          }
+                        }]
+                      }
+                    else
+                      .locations |= map(
+                        if .physicalLocation then
+                          .physicalLocation.artifactLocation = ((.physicalLocation.artifactLocation // {}) + {
+                            uri: (if has_text($mapped_path) then $mapped_path else "package.json" end),
+                            uriBaseId: "%SRCROOT%"
+                          })
+                          | .physicalLocation.region = ((.physicalLocation.region // {}) + {
+                              startLine: (if has_text($mapped_path) then (.physicalLocation.region.startLine // 1) else 2 end)
+                            })
+                        else
+                          . + {
+                            physicalLocation: {
+                              artifactLocation: {
+                                uri: (if has_text($mapped_path) then $mapped_path else "package.json" end),
+                                uriBaseId: "%SRCROOT%"
+                              },
+                              region: { startLine: (if has_text($mapped_path) then 1 else 2 end) }
+                            }
+                          }
+                        end
+                      )
+                    end
+                )
+              | (
+                  reduce (.results[]?) as $r ({};
+                    ($r.ruleId // "") as $rid
+                    | if $rid == "" then .
+                      else
+                        ($r | score_from_result) as $score
+                        | if $score == null then .
+                          else .[$rid] = (if (.[ $rid ] // -1) > $score then .[$rid] else $score end)
+                          end
+                      end
                   )
-                end
-              )
+                ) as $score_by_rule
+              | .tool.driver.rules |= map(
+                  (.id // "") as $rid
+                  | if ($score_by_rule[$rid] != null) then
+                      .properties = ((.properties // {}) + {
+                        "security-severity": (($score_by_rule[$rid] * 10 | round / 10) | tostring),
+                        "precision": (.properties.precision // "high"),
+                        "tags": (((.properties.tags // []) + ["security"]) | unique)
+                      })
+                    else
+                      .
+                    end
+                )
             )
           ' dtrack-yarn4.sarif > dtrack-yarn4.normalized.sarif
 
@@ -223,6 +362,92 @@ jobs:
         with:
           sarif_file: dtrack-yarn4.sarif
           category: dependency-track-yarn4
+
+      - name: Compute introduced code scanning alerts (yarn4, high/critical)
+        id: code_scanning_yarn4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4)
+        run: |
+          set -euo pipefail
+
+          urlencode() {
+            jq -rn --arg value "$1" '$value|@uri'
+          }
+
+          fetch_alert_numbers() {
+            local ref="$1"
+            local severity="$2"
+            local encoded_ref encoded_tool page response count
+            encoded_ref="$(urlencode "$ref")"
+            encoded_tool="$(urlencode "$TOOL_NAME")"
+            page=1
+            while :; do
+              response="$(curl -fsSL \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=$encoded_tool&severity=$severity&ref=$encoded_ref&per_page=100&page=$page")"
+              count="$(echo "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
+                break
+              fi
+              echo "$response" | jq -r '.[].number'
+              page=$((page + 1))
+            done | sed '/^$/d' | sort -n -u
+          }
+
+          count_diff() {
+            local left="$1"
+            local right="$2"
+            local left_file right_file
+            left_file="$(mktemp)"
+            right_file="$(mktemp)"
+            printf '%s\n' "$left" | sed '/^$/d' | sort -n -u > "$left_file"
+            printf '%s\n' "$right" | sed '/^$/d' | sort -n -u > "$right_file"
+            comm -23 "$left_file" "$right_file" | sed '/^$/d' | wc -l | tr -d ' '
+            rm -f "$left_file" "$right_file"
+          }
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "${PR_NUMBER:-}" ]; then
+            head_ref="refs/pull/${PR_NUMBER}/merge"
+            base_ref="refs/heads/${BASE_REF}"
+            branch_name="${GITHUB_HEAD_REF}"
+          else
+            head_ref="refs/heads/${GITHUB_REF_NAME}"
+            base_ref="refs/heads/${DEFAULT_BRANCH:-main}"
+            branch_name="${GITHUB_REF_NAME}"
+          fi
+
+          head_critical="$(fetch_alert_numbers "$head_ref" "critical" || true)"
+          head_high="$(fetch_alert_numbers "$head_ref" "high" || true)"
+          base_critical="$(fetch_alert_numbers "$base_ref" "critical" || true)"
+          base_high="$(fetch_alert_numbers "$base_ref" "high" || true)"
+
+          introduced_critical="$(count_diff "$head_critical" "$base_critical")"
+          introduced_high="$(count_diff "$head_high" "$base_high")"
+          introduced_total=$((introduced_critical + introduced_high))
+
+          query="is:open branch:${branch_name} tool:\"${TOOL_NAME}\""
+          branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(urlencode "$query")"
+
+          echo "Head ref: $head_ref"
+          echo "Base ref: $base_ref"
+          echo "Introduced critical alerts: $introduced_critical"
+          echo "Introduced high alerts: $introduced_high"
+          echo "Introduced total alerts: $introduced_total"
+          echo "Branch code scanning URL: $branch_url"
+
+          {
+            echo "introduced_critical=$introduced_critical"
+            echo "introduced_high=$introduced_high"
+            echo "introduced_total=$introduced_total"
+            echo "branch_url=$branch_url"
+            echo "head_ref=$head_ref"
+            echo "base_ref=$base_ref"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Export VEX and VDR JSON (yarn4)
         env:
@@ -306,21 +531,40 @@ jobs:
           fi
           echo "- Review tab: yarn4" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce vulnerability gate (critical/high)
+      - name: Report code scanning summary (yarn4)
         run: |
           set -euo pipefail
 
-          crit="${{ steps.sheets_yarn4.outputs.unresolved_critical }}"
-          high="${{ steps.sheets_yarn4.outputs.unresolved_high }}"
+          introduced_critical="${{ steps.code_scanning_yarn4.outputs.introduced_critical }}"
+          introduced_high="${{ steps.code_scanning_yarn4.outputs.introduced_high }}"
+          introduced_total="${{ steps.code_scanning_yarn4.outputs.introduced_total }}"
+          branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
+          introduced_critical="${introduced_critical:-0}"
+          introduced_high="${introduced_high:-0}"
+          introduced_total="${introduced_total:-0}"
+
+          echo "::notice::Yarn4 introduced alerts in current ref: critical=$introduced_critical high=$introduced_high"
+          echo "### Yarn4 code scanning" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced critical alerts: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced high alerts: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Introduced total alerts: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce introduced vulnerability gate (critical/high)
+        run: |
+          set -euo pipefail
+
+          crit="${{ steps.code_scanning_yarn4.outputs.introduced_critical }}"
+          high="${{ steps.code_scanning_yarn4.outputs.introduced_high }}"
           crit="${crit:-0}"
           high="${high:-0}"
-          sheet_url="${{ steps.sheets_yarn4.outputs.sheet_url }}"
+          branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
 
-          echo "Final unresolved gate values (False positive empty): critical=[$crit] high=[$high]"
+          echo "Final introduced gate values: critical=[$crit] high=[$high]"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "::error::Found unresolved critical/high findings (critical=$crit, high=$high). Review: $sheet_url"
+            echo "::error::Found introduced critical/high code scanning alerts (critical=$crit, high=$high). Review: $branch_url"
             exit 1
           fi
 
-          echo "No unresolved critical or high findings"
+          echo "No introduced critical or high alerts"
