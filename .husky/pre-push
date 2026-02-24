@@ -1,4 +1,17 @@
 #!/bin/sh
 . "$(dirname "$0")/_/husky.sh"
 
-yarn prettify && yarn lint && yarn update-po
+yarn prettify && yarn lint && yarn update-po && yarn test
+
+if command -v snyk >/dev/null 2>&1; then
+  if snyk test; then
+    :
+  else
+    echo "snyk test failed; attempting authentication"
+    snyk auth || echo "snyk auth failed (non-blocking)"
+    snyk test || echo "snyk test failed (non-blocking)"
+  fi
+  echo "Tip: you can generate an HTML report with: snyk test --all-projects --dev --json-file-output=snyk.json || true && snyk-to-html -i snyk.json -o snyk-report.html -s (install snyk-to-html)"
+else
+  echo "snyk not found. Install it to run snyk auth/test."
+fi

@@ -1,0 +1,467 @@
+name: Generate Bom Yarn 4 CycloneDX
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+
+concurrency:
+  group: dtrack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generatebomv4:
+    runs-on: bom
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read node version (min 20.18.0 for CycloneDX)
+        run: |
+          if [ -f .nvmrc ]; then
+            ver="$(tr -d 'v' < .nvmrc)"
+          else
+            ver="20.18.0"
+          fi
+          min="20.18.0"
+          if [ "$(printf '%s\n' "$ver" "$min" | sort -V | head -n1)" = "$ver" ] && [ "$ver" != "$min" ]; then
+            ver="$min"
+          fi
+          echo "NODE_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Yarn Berry + CycloneDX (container)
+        run: |
+          podman run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            node:${NODE_VERSION}-bullseye \
+            bash -lc '
+              corepack enable
+              yarn set version berry
+              if [ ! -f src/package.json ]; then
+                printf "{\n  \"name\": \"local-src\",\n  \"version\": \"0.0.0\"\n}\n" > src/package.json
+              fi
+              # CycloneDX rejects invalid package names like "$"; strip for BOM generation only.
+              cp package.json /tmp/package.json.orig
+              node -e "const fs=require(\"fs\");const pkg=JSON.parse(fs.readFileSync(\"package.json\",\"utf8\"));if(pkg.dependencies&&pkg.dependencies[\"\\$\"]){delete pkg.dependencies[\"\\$\"];};fs.writeFileSync(\"package.json\",JSON.stringify(pkg,null,2)+\"\\n\");"
+              yarn install
+              yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON
+              mv /tmp/package.json.orig package.json '
+
+      - name: Upload BOM to Dependency-Track and fetch metrics
+        id: dtrack_yarn4
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          test -f bom_berry.json || { echo "bom_berry.json not found"; ls -lah; exit 1; }
+
+          projectName="${GITHUB_REPOSITORY}-berry"
+          if [ -n "${PR_NUMBER:-}" ]; then
+            projectVersion="pr-${PR_NUMBER}"
+          else
+            projectVersion="${GITHUB_REF_NAME:-main}"
+          fi
+
+          token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/bom" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+              -F "projectName=$projectName" \
+              -F "projectVersion=$projectVersion" \
+              -F "autoCreate=true" \
+              -F "bom=@bom_berry.json" \
+            | jq -r '.token'
+          )"
+          echo "Dependency-Track token: $token"
+
+          echo "Waiting for Dependency-Track to finish processing..."
+          processing="true"
+          for i in {1..120}; do
+              processing="$(curl -sSf "$DTRACK_URL/api/v1/bom/token/$token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+              if [ "$processing" = "false" ]; then
+              echo "Processing finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "Timed out waiting for BOM processing"
+            exit 1
+          fi
+          
+          projectNameEnc=$(printf '%s' "$projectName" | jq -sRr @uri)
+          projectVersionEnc=$(printf '%s' "$projectVersion" | jq -sRr @uri)
+
+          project="$(curl -sSf \
+          "$DTRACK_URL/api/v1/project/lookup?name=${projectNameEnc}&version=${projectVersionEnc}" \
+          -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          uuid="$(echo "$project" | jq -r '.uuid // empty')"
+          if [ -z "$uuid" ]; then
+            echo "::error::Could not resolve project UUID from Dependency-Track lookup"
+            echo "$project"
+            exit 1
+          fi
+          echo "Project UUID: $uuid"
+
+          metrics="$(curl -sSf "$DTRACK_URL/api/v1/metrics/project/$uuid/current" -H "X-Api-Key: $DTRACK_API_KEY")"
+
+          echo "=== Metrics ==="
+          echo "$metrics" | jq '{critical, high, medium, low, unassigned, vulnerabilities, vulnerableComponents, components}'
+
+          crit="$(echo "$metrics" | jq -r '.critical // 0')"
+          high="$(echo "$metrics" | jq -r '.high // 0')"
+          
+          crit="$(echo "$crit" | tr -d '\r\n ')"
+          high="$(echo "$high" | tr -d '\r\n ')"
+          
+          echo "Collected gate values: critical=[$crit] high=[$high]"
+
+          if ! [[ "$crit" =~ ^[0-9]+$ ]] || ! [[ "$high" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid metrics values: critical=[$crit], high=[$high]"
+            exit 1
+          fi
+
+          echo "project_uuid=$uuid" >> "$GITHUB_OUTPUT"
+          echo "critical=$crit" >> "$GITHUB_OUTPUT"
+          echo "high=$high" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Dependency-Track analysis and wait
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          analysis_token="$(
+            curl -sSf -X POST "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID/analyze" \
+              -H "X-Api-Key: $DTRACK_API_KEY" \
+            | jq -r '.token // empty'
+          )"
+
+          if [ -z "$analysis_token" ]; then
+            echo "::error::Dependency-Track analysis token was empty"
+            exit 1
+          fi
+
+          echo "Waiting for Dependency-Track analysis to finish..."
+          processing="true"
+          for i in {1..120}; do
+            processing="$(curl -sSf "$DTRACK_URL/api/v1/event/token/$analysis_token" -H "X-Api-Key: $DTRACK_API_KEY" | jq -r '.processing')"
+            if [ "$processing" = "false" ]; then
+              echo "Analysis finished."
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$processing" != "false" ]; then
+            echo "::error::Timed out waiting for Dependency-Track analysis"
+            exit 1
+          fi
+
+      - name: Export SARIF findings (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID?suppressed=false" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -H "Accept: application/sarif+json" \
+            -o dtrack-yarn4.sarif
+
+          test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
+          jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
+
+      - name: Export VEX and VDR JSON for SARIF mapping (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/vex/cyclonedx/project/$PROJECT_UUID" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o vex_yarn4.json
+
+          curl -sSf "$DTRACK_URL/api/v1/bom/cyclonedx/project/$PROJECT_UUID?variant=vdr&format=JSON" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o bom_yarn4.json
+
+          test -s vex_yarn4.json || { echo "::error::vex_yarn4.json is missing or empty"; exit 1; }
+          test -s bom_yarn4.json || { echo "::error::bom_yarn4.json is missing or empty"; exit 1; }
+
+      - name: Download normalize_sarif.py (shared script)
+        env:
+          NORMALIZE_SARIF_URL: https://raw.githubusercontent.com/EyeSeeTea/security-tests/feature/dependanbot-actions/scripts/normalize_sarif.py
+        run: |
+          set -euo pipefail
+
+          mkdir -p .dtrack-tools
+          curl -fsSL "$NORMALIZE_SARIF_URL" -o .dtrack-tools/normalize_sarif.py
+          python3 -m py_compile .dtrack-tools/normalize_sarif.py
+
+      - name: Normalize SARIF for GitHub Code Scanning (yarn4)
+        run: |
+          set -euo pipefail
+
+          python3 .dtrack-tools/normalize_sarif.py \
+            --input-sarif dtrack-yarn4.sarif \
+            --output-sarif dtrack-yarn4.sarif \
+            --vdr bom_yarn4.json \
+            --vex vex_yarn4.json \
+            --source yarn4-test \
+            --tool-name "OWASP Dependency-Track (yarn4-test)" \
+            --rule-id-namespace "yarn4-test::" \
+            --location-mode fallback \
+            --fallback-uri bom.json \
+            --fallback-line 1
+
+          jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-yarn4.sarif >/dev/null
+
+      - name: Debug normalized SARIF identity (yarn4)
+        run: |
+          set -euo pipefail
+          echo "Tool name:"
+          jq -r '.runs[0].tool.driver.name' dtrack-yarn4.sarif
+          echo "First 5 rule IDs:"
+          jq -r '.runs[0].results[0:5][] | .ruleId' dtrack-yarn4.sarif
+
+      - name: Snapshot open code scanning alerts before SARIF upload (yarn4)
+        id: code_scanning_before_yarn4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4-test)
+        run: |
+          set -euo pipefail
+
+          urlencode() {
+            jq -rn --arg value "$1" '$value|@uri'
+          }
+
+          fetch_alert_numbers() {
+            local ref="$1"
+            local severity="$2"
+            local encoded_ref encoded_tool page response count
+            encoded_ref="$(urlencode "$ref")"
+            encoded_tool="$(urlencode "$TOOL_NAME")"
+            page=1
+            while :; do
+              response="$(curl -fsSL \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=$encoded_tool&severity=$severity&ref=$encoded_ref&per_page=100&page=$page")"
+              count="$(echo "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
+                break
+              fi
+              echo "$response" | jq -r '.[].number'
+              page=$((page + 1))
+            done | sed '/^$/d' | sort -n -u
+          }
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "${PR_NUMBER:-}" ]; then
+            head_ref="refs/pull/${PR_NUMBER}/merge"
+            base_ref="refs/heads/${BASE_REF}"
+            branch_name="${GITHUB_HEAD_REF}"
+          else
+            head_ref="refs/heads/${GITHUB_REF_NAME}"
+            base_ref="refs/heads/${DEFAULT_BRANCH:-main}"
+            branch_name="${GITHUB_REF_NAME}"
+          fi
+
+          before_critical="$(fetch_alert_numbers "$head_ref" "critical" || true)"
+          before_high="$(fetch_alert_numbers "$head_ref" "high" || true)"
+
+          before_critical_file="$RUNNER_TEMP/dtrack_yarn4_before_critical.txt"
+          before_high_file="$RUNNER_TEMP/dtrack_yarn4_before_high.txt"
+          printf '%s\n' "$before_critical" | sed '/^$/d' | sort -n -u > "$before_critical_file"
+          printf '%s\n' "$before_high" | sed '/^$/d' | sort -n -u > "$before_high_file"
+
+          before_critical_count="$(wc -l < "$before_critical_file" | tr -d ' ')"
+          before_high_count="$(wc -l < "$before_high_file" | tr -d ' ')"
+          before_total_count=$((before_critical_count + before_high_count))
+
+          echo "Head ref: $head_ref"
+          echo "Base ref: $base_ref"
+          echo "Before upload open critical alerts: $before_critical_count"
+          echo "Before upload open high alerts: $before_high_count"
+          echo "Before upload open total alerts: $before_total_count"
+
+          {
+            echo "head_ref=$head_ref"
+            echo "base_ref=$base_ref"
+            echo "branch_name=$branch_name"
+            echo "before_critical_count=$before_critical_count"
+            echo "before_high_count=$before_high_count"
+            echo "before_total_count=$before_total_count"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF to GitHub Code Scanning (yarn4)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: dtrack-yarn4.sarif
+          category: dependency-track-yarn4-test
+
+      # Computes two metrics:
+      # 1) open_unresolved: currently open alerts in the scanned ref.
+      # 2) newly_introduced_this_run: open(after upload) - open(before upload).
+      - name: Compute code scanning deltas after SARIF upload (yarn4, high/critical)
+        id: code_scanning_yarn4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4-test)
+          HEAD_REF: ${{ steps.code_scanning_before_yarn4.outputs.head_ref }}
+          BRANCH_NAME: ${{ steps.code_scanning_before_yarn4.outputs.branch_name }}
+        run: |
+          set -euo pipefail
+
+          urlencode() {
+            jq -rn --arg value "$1" '$value|@uri'
+          }
+
+          fetch_alert_numbers() {
+            local ref="$1"
+            local severity="$2"
+            local encoded_ref encoded_tool page response count
+            encoded_ref="$(urlencode "$ref")"
+            encoded_tool="$(urlencode "$TOOL_NAME")"
+            page=1
+            while :; do
+              response="$(curl -fsSL \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&tool_name=$encoded_tool&severity=$severity&ref=$encoded_ref&per_page=100&page=$page")"
+              count="$(echo "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
+                break
+              fi
+              echo "$response" | jq -r '.[].number'
+              page=$((page + 1))
+            done | sed '/^$/d' | sort -n -u
+          }
+
+          list_diff() {
+            local left="$1"
+            local right="$2"
+            local left_file right_file
+            left_file="$(mktemp)"
+            right_file="$(mktemp)"
+            printf '%s\n' "$left" | sed '/^$/d' | sort -n -u > "$left_file"
+            printf '%s\n' "$right" | sed '/^$/d' | sort -n -u > "$right_file"
+            comm -23 "$left_file" "$right_file" | sed '/^$/d'
+            rm -f "$left_file" "$right_file"
+          }
+
+          count_list() {
+            printf '%s\n' "$1" | sed '/^$/d' | wc -l | tr -d ' '
+          }
+
+          after_critical="$(fetch_alert_numbers "$HEAD_REF" "critical" || true)"
+          after_high="$(fetch_alert_numbers "$HEAD_REF" "high" || true)"
+          before_critical="$(cat "$RUNNER_TEMP/dtrack_yarn4_before_critical.txt" 2>/dev/null || true)"
+          before_high="$(cat "$RUNNER_TEMP/dtrack_yarn4_before_high.txt" 2>/dev/null || true)"
+
+          open_critical="$(count_list "$after_critical")"
+          open_high="$(count_list "$after_high")"
+          open_total=$((open_critical + open_high))
+
+          new_critical_ids="$(list_diff "$after_critical" "$before_critical" || true)"
+          new_high_ids="$(list_diff "$after_high" "$before_high" || true)"
+          new_critical="$(count_list "$new_critical_ids")"
+          new_high="$(count_list "$new_high_ids")"
+          new_total=$((new_critical + new_high))
+          new_critical_csv="$(printf '%s\n' "$new_critical_ids" | sed '/^$/d' | paste -sd, -)"
+          new_high_csv="$(printf '%s\n' "$new_high_ids" | sed '/^$/d' | paste -sd, -)"
+
+          query="is:open branch:${BRANCH_NAME} tool:\"${TOOL_NAME}\""
+          branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(urlencode "$query")"
+
+          echo "Head ref: $HEAD_REF"
+          echo "Open unresolved (critical/high/total): $open_critical/$open_high/$open_total"
+          echo "Newly introduced this run (critical/high/total): $new_critical/$new_high/$new_total"
+          echo "New critical alert numbers this run: ${new_critical_csv:-none}"
+          echo "New high alert numbers this run: ${new_high_csv:-none}"
+          echo "Branch code scanning URL: $branch_url"
+
+          {
+            echo "open_critical=$open_critical"
+            echo "open_high=$open_high"
+            echo "open_total=$open_total"
+            echo "new_critical=$new_critical"
+            echo "new_high=$new_high"
+            echo "new_total=$new_total"
+            echo "new_critical_ids_csv=$new_critical_csv"
+            echo "new_high_ids_csv=$new_high_csv"
+            echo "branch_url=$branch_url"
+            echo "head_ref=$HEAD_REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report code scanning summary (yarn4)
+        run: |
+          set -euo pipefail
+
+          open_critical="${{ steps.code_scanning_yarn4.outputs.open_critical }}"
+          open_high="${{ steps.code_scanning_yarn4.outputs.open_high }}"
+          open_total="${{ steps.code_scanning_yarn4.outputs.open_total }}"
+          new_critical="${{ steps.code_scanning_yarn4.outputs.new_critical }}"
+          new_high="${{ steps.code_scanning_yarn4.outputs.new_high }}"
+          new_total="${{ steps.code_scanning_yarn4.outputs.new_total }}"
+          branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          open_total="${open_total:-0}"
+          new_critical="${new_critical:-0}"
+          new_high="${new_high:-0}"
+          new_total="${new_total:-0}"
+
+          echo "::notice::Yarn4 alerts: open_unresolved critical=$open_critical high=$open_high | new_this_run critical=$new_critical high=$new_high"
+          echo "### Yarn4 code scanning" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved critical alerts: $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved high alerts: $open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open unresolved total alerts: $open_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced critical alerts (this run): $new_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced high alerts (this run): $new_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Newly introduced total alerts (this run): $new_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce newly introduced vulnerability gate (critical/high)
+        run: |
+          set -euo pipefail
+
+          crit="${{ steps.code_scanning_yarn4.outputs.new_critical }}"
+          high="${{ steps.code_scanning_yarn4.outputs.new_high }}"
+          new_crit_ids="${{ steps.code_scanning_yarn4.outputs.new_critical_ids_csv }}"
+          new_high_ids="${{ steps.code_scanning_yarn4.outputs.new_high_ids_csv }}"
+          crit="${crit:-0}"
+          high="${high:-0}"
+          new_crit_ids="${new_crit_ids:-}"
+          new_high_ids="${new_high_ids:-}"
+          branch_url="${{ steps.code_scanning_yarn4.outputs.branch_url }}"
+
+          echo "Final gate values (newly introduced this run): critical=[$crit] high=[$high]"
+
+          if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "New critical alert numbers this run: ${new_crit_ids:-none}"
+            echo "New high alert numbers this run: ${new_high_ids:-none}"
+            echo "::error::Found newly introduced critical/high code scanning alerts in this run (critical=$crit, high=$high). Review: $branch_url"
+            exit 1
+          fi
+
+          echo "No newly introduced critical or high alerts in this run"
