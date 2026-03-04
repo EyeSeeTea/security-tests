@@ -135,22 +135,6 @@ jobs:
 
           jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-syft.sarif >/dev/null
 
-      - name: Estimate introduced candidates from SARIF vs base (syft)
-        id: introduced_candidates_syft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TOOL_NAME: OWASP Dependency-Track (syft)
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          python3 scripts/estimate_introduced_candidates_from_sarif.py \
-            --sarif dtrack-syft.sarif \
-            --repo "$GITHUB_REPOSITORY" \
-            --tool-name "$TOOL_NAME" \
-            --base-branch "${BASE_REF:-${GITHUB_REF_NAME}}" \
-            --out-dir "$RUNNER_TEMP" \
-            --prefix "dtrack_syft"
-
       - name: Upload SARIF to GitHub Code Scanning (syft)
         uses: github/codeql-action/upload-sarif@v4
         with:
@@ -158,6 +142,24 @@ jobs:
           category: dependency-track-syft
           ref: ${{ steps.code_scanning_target.outputs.code_scanning_ref }}
           sha: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
+
+      - name: Estimate introduced candidates from SARIF vs base (syft)
+        id: introduced_candidates_syft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (syft)
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF_NAME: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          python3 scripts/estimate_introduced_candidates_from_sarif.py \
+            --sarif dtrack-syft.sarif \
+            --repo "$GITHUB_REPOSITORY" \
+            --tool-name "$TOOL_NAME" \
+            --head-branch "${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --base-branch "${BASE_REF:-${GITHUB_REF_NAME}}" \
+            --out-dir "$RUNNER_TEMP" \
+            --prefix "dtrack_syft"
 
       - name: Report code scanning summary (syft)
         run: |
@@ -178,6 +180,7 @@ jobs:
           sarif_total="${{ steps.introduced_candidates_syft.outputs.sarif_rule_ids_all_count }}"
           base_total="${{ steps.introduced_candidates_syft.outputs.base_rule_ids_all_count }}"
           baseline_missing="${{ steps.introduced_candidates_syft.outputs.baseline_missing }}"
+          summary_file="${{ steps.introduced_candidates_syft.outputs.summary_file }}"
           branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
           query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (syft)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
@@ -197,6 +200,7 @@ jobs:
           sarif_total="${sarif_total:-0}"
           base_total="${base_total:-0}"
           baseline_missing="${baseline_missing:-false}"
+          summary_file="${summary_file:-}"
 
           echo "::notice::Syft introduced candidates vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
           echo "### Syft code scanning" >> "$GITHUB_STEP_SUMMARY"
@@ -217,6 +221,15 @@ jobs:
           echo "- SARIF rule IDs (all severities): $sarif_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+            echo "- New issues list (head open - base open):" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.rule_ids.introduced_candidate_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
+            echo "- Open issues list in branch (still unresolved):" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.rule_ids.head_open_rule_ids_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- New issues list (head open - base open): unavailable" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Open issues list in branch (still unresolved): unavailable" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce newly introduced vulnerability gate (critical/high)
