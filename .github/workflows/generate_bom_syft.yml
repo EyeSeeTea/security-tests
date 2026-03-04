@@ -19,7 +19,28 @@ jobs:
       actions: read
       security-events: write
     steps:
+      - name: Resolve code scanning target (ref/sha)
+        id: code_scanning_target
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          sha="${GITHUB_SHA}"
+
+          pr_head_ref="$(jq -r '.pull_request.head.ref // empty' "$GITHUB_EVENT_PATH")"
+          pr_head_sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")"
+
+          if [ -n "$pr_head_ref" ] && [ -n "$pr_head_sha" ]; then
+            ref="refs/heads/$pr_head_ref"
+            sha="$pr_head_sha"
+          fi
+
+          echo "code_scanning_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "code_scanning_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved code scanning target: ref=$ref sha=$sha"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
 
       - name: Read node version (fallback 20)
         run: |
@@ -133,6 +154,8 @@ jobs:
         with:
           sarif_file: dtrack-syft.sarif
           category: dependency-track-syft
+          ref: ${{ steps.code_scanning_target.outputs.code_scanning_ref }}
+          sha: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
 
       - name: Report code scanning summary (syft)
         run: |
