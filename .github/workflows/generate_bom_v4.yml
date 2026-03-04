@@ -108,28 +108,20 @@ jobs:
             --output-sarif dtrack-yarn4.sarif \
             --vdr bom_yarn4.json \
             --vex vex_yarn4.json \
-            --source yarn4-test \
-            --tool-name "OWASP Dependency-Track (yarn4-test)" \
-            --rule-id-namespace "yarn4-test::" \
+            --source yarn4 \
+            --tool-name "OWASP Dependency-Track (yarn4)" \
+            --rule-id-namespace "yarn4::" \
             --location-mode fallback \
             --fallback-uri bom.json \
             --fallback-line 1
 
           jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-yarn4.sarif >/dev/null
 
-      - name: Debug normalized SARIF identity (yarn4)
-        run: |
-          set -euo pipefail
-          echo "Tool name:"
-          jq -r '.runs[0].tool.driver.name' dtrack-yarn4.sarif
-          echo "First 5 rule IDs:"
-          jq -r '.runs[0].results[0:5][] | .ruleId' dtrack-yarn4.sarif
-
       - name: Estimate introduced candidates from SARIF vs base (yarn4)
         id: introduced_candidates_yarn4
         env:
           GH_TOKEN: ${{ github.token }}
-          TOOL_NAME: OWASP Dependency-Track (yarn4-test)
+          TOOL_NAME: OWASP Dependency-Track (yarn4)
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
@@ -145,7 +137,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: dtrack-yarn4.sarif
-          category: dependency-track-yarn4-test
+          category: dependency-track-yarn4
 
       - name: Report code scanning summary (yarn4)
         run: |
@@ -157,12 +149,17 @@ jobs:
           introduced_low="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_low_count }}"
           introduced_unknown="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_unknown_count }}"
           introduced_total="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_all_count }}"
+          open_critical="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_critical_count }}"
+          open_high="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_high_count }}"
+          open_medium="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_medium_count }}"
+          open_low="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_low_count }}"
+          open_unknown="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_unknown_count }}"
+          open_total="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_all_count }}"
           sarif_total="${{ steps.introduced_candidates_yarn4.outputs.sarif_rule_ids_all_count }}"
           base_total="${{ steps.introduced_candidates_yarn4.outputs.base_rule_ids_all_count }}"
           baseline_missing="${{ steps.introduced_candidates_yarn4.outputs.baseline_missing }}"
-          summary_file="${{ steps.introduced_candidates_yarn4.outputs.summary_file }}"
           branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4-test)\""
+          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
 
           introduced_critical="${introduced_critical:-0}"
@@ -171,23 +168,35 @@ jobs:
           introduced_low="${introduced_low:-0}"
           introduced_unknown="${introduced_unknown:-0}"
           introduced_total="${introduced_total:-0}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          open_medium="${open_medium:-0}"
+          open_low="${open_low:-0}"
+          open_unknown="${open_unknown:-0}"
+          open_total="${open_total:-0}"
           sarif_total="${sarif_total:-0}"
           base_total="${base_total:-0}"
           baseline_missing="${baseline_missing:-false}"
-          summary_file="${summary_file:-}"
 
           echo "::notice::Yarn4 introduced candidates vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
           echo "### Yarn4 code scanning" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New issues detected (branch vs base):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $introduced_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $introduced_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $introduced_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open issues in branch (not yet resolved):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $open_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $open_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $open_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $open_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- SARIF rule IDs (all severities): $sarif_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates critical: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates high: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates medium: $introduced_medium" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates low: $introduced_low" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates unknown: $introduced_unknown" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Introduced candidates total: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Summary JSON: ${summary_file:-n/a}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce newly introduced vulnerability gate (critical/high)
@@ -196,28 +205,22 @@ jobs:
 
           crit="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_critical_count }}"
           high="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_high_count }}"
-          summary_file="${{ steps.introduced_candidates_yarn4.outputs.summary_file }}"
+          med="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_medium_count }}"
+          low="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_low_count }}"
           branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4-test)\""
+          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
 
           crit="${crit:-0}"
           high="${high:-0}"
+          med="${med:-0}"
+          low="${low:-0}"
 
-          new_crit_ids=""
-          new_high_ids=""
-          if [ -n "${summary_file:-}" ] && [ -f "$summary_file" ]; then
-            new_crit_ids="$(jq -r '.introduced_candidate_by_severity.critical[]?' "$summary_file" | paste -sd, -)"
-            new_high_ids="$(jq -r '.introduced_candidate_by_severity.high[]?' "$summary_file" | paste -sd, -)"
-          fi
-
-          echo "Final gate values (introduced candidates vs base): critical=[$crit] high=[$high]"
+          echo "New issues detected (branch vs base): critical=$crit high=$high medium=$med low=$low"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "Introduced critical rule IDs: ${new_crit_ids:-none}"
-            echo "Introduced high rule IDs: ${new_high_ids:-none}"
-            echo "::error::Found introduced critical/high rule IDs vs base (critical=$crit, high=$high). Review: $branch_url"
+            echo "::error::New critical/high issues detected vs base (critical=$crit, high=$high, medium=$med, low=$low). Review: $branch_url"
             exit 1
           fi
 
-          echo "No introduced critical or high rule IDs vs base"
+          echo "No new critical/high issues detected vs base"

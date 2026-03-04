@@ -230,6 +230,19 @@ def main() -> int:
 
     introduced_candidate_all = sarif_rule_ids_all - base_rule_ids_all
 
+    open_in_branch_by_severity: Dict[str, List[str]] = {
+        "critical": [],
+        "high": [],
+        "medium": [],
+        "low": [],
+        "unknown": [],
+    }
+    for rule_id in sorted(sarif_rule_ids_all):
+        sev = sarif_severity_by_rule.get(rule_id, "unknown")
+        if sev not in open_in_branch_by_severity:
+            sev = "unknown"
+        open_in_branch_by_severity[sev].append(rule_id)
+
     introduced_by_severity: Dict[str, List[str]] = {
         "critical": [],
         "high": [],
@@ -260,6 +273,12 @@ def main() -> int:
         "base_ref": base_ref,
         "sarif_rule_ids_all_count": len(sarif_rule_ids_sorted),
         "base_rule_ids_all_count": len(base_rule_ids_sorted),
+        "open_in_branch_all_count": len(sarif_rule_ids_sorted),
+        "open_in_branch_critical_count": len(open_in_branch_by_severity["critical"]),
+        "open_in_branch_high_count": len(open_in_branch_by_severity["high"]),
+        "open_in_branch_medium_count": len(open_in_branch_by_severity["medium"]),
+        "open_in_branch_low_count": len(open_in_branch_by_severity["low"]),
+        "open_in_branch_unknown_count": len(open_in_branch_by_severity["unknown"]),
         "introduced_candidate_all_count": len(introduced_candidate_all_sorted),
         "introduced_candidate_critical_count": len(introduced_by_severity["critical"]),
         "introduced_candidate_high_count": len(introduced_by_severity["high"]),
@@ -272,6 +291,7 @@ def main() -> int:
             "base_rule_ids_all": base_rule_ids_sorted,
             "introduced_candidate_all": introduced_candidate_all_sorted,
         },
+        "open_in_branch_by_severity": open_in_branch_by_severity,
         "introduced_candidate_by_severity": introduced_by_severity,
         "summary_file": str(summary_file),
     }
@@ -286,6 +306,14 @@ def main() -> int:
     print(f"SARIF file: {sarif_path}")
     print(f"sarif_rule_ids_all: {summary['sarif_rule_ids_all_count']}")
     print(f"base_rule_ids_all: {summary['base_rule_ids_all_count']}")
+    print(
+        "open_in_branch by severity (critical/high/medium/low/unknown): "
+        f"{summary['open_in_branch_critical_count']}/"
+        f"{summary['open_in_branch_high_count']}/"
+        f"{summary['open_in_branch_medium_count']}/"
+        f"{summary['open_in_branch_low_count']}/"
+        f"{summary['open_in_branch_unknown_count']}"
+    )
     print(f"introduced_candidate_all: {summary['introduced_candidate_all_count']}")
     print(
         "introduced by severity (critical/high/medium/low/unknown): "
@@ -303,6 +331,12 @@ def main() -> int:
             "base_ref": summary["base_ref"],
             "sarif_rule_ids_all_count": str(summary["sarif_rule_ids_all_count"]),
             "base_rule_ids_all_count": str(summary["base_rule_ids_all_count"]),
+            "open_in_branch_all_count": str(summary["open_in_branch_all_count"]),
+            "open_in_branch_critical_count": str(summary["open_in_branch_critical_count"]),
+            "open_in_branch_high_count": str(summary["open_in_branch_high_count"]),
+            "open_in_branch_medium_count": str(summary["open_in_branch_medium_count"]),
+            "open_in_branch_low_count": str(summary["open_in_branch_low_count"]),
+            "open_in_branch_unknown_count": str(summary["open_in_branch_unknown_count"]),
             "introduced_candidate_all_count": str(summary["introduced_candidate_all_count"]),
             "introduced_candidate_critical_count": str(summary["introduced_candidate_critical_count"]),
             "introduced_candidate_high_count": str(summary["introduced_candidate_high_count"]),
