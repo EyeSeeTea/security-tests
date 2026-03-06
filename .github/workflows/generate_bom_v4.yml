@@ -1,0 +1,280 @@
+name: Generate Bom Yarn 4 CycloneDX
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: dtrack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generatebomv4:
+    runs-on: bom
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Resolve code scanning target (ref/sha)
+        id: code_scanning_target
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          sha="${GITHUB_SHA}"
+
+          pr_head_ref="$(jq -r '.pull_request.head.ref // empty' "$GITHUB_EVENT_PATH")"
+          pr_head_sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH")"
+
+          if [ -n "$pr_head_ref" ] && [ -n "$pr_head_sha" ]; then
+            ref="refs/heads/$pr_head_ref"
+            sha="$pr_head_sha"
+          fi
+
+          echo "code_scanning_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "code_scanning_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved code scanning target: ref=$ref sha=$sha"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
+
+      - name: Read node version (min 20.18.0 for CycloneDX)
+        run: |
+          if [ -f .nvmrc ]; then
+            ver="$(tr -d 'v' < .nvmrc)"
+          else
+            ver="20.18.0"
+          fi
+          min="20.18.0"
+          if [ "$(printf '%s\n' "$ver" "$min" | sort -V | head -n1)" = "$ver" ] && [ "$ver" != "$min" ]; then
+            ver="$min"
+          fi
+          echo "NODE_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Yarn Berry + CycloneDX (container)
+        run: |
+          podman run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            node:${NODE_VERSION}-bullseye \
+            bash -lc '
+              corepack enable
+              yarn set version berry
+              if [ ! -f src/package.json ]; then
+                printf "{\n  \"name\": \"local-src\",\n  \"version\": \"0.0.0\"\n}\n" > src/package.json
+              fi
+              # CycloneDX rejects invalid package names like "$"; strip for BOM generation only.
+              cp package.json /tmp/package.json.orig
+              node -e "const fs=require(\"fs\");const pkg=JSON.parse(fs.readFileSync(\"package.json\",\"utf8\"));if(pkg.dependencies&&pkg.dependencies[\"\\$\"]){delete pkg.dependencies[\"\\$\"];};fs.writeFileSync(\"package.json\",JSON.stringify(pkg,null,2)+\"\\n\");"
+              yarn install
+              yarn dlx -q @cyclonedx/yarn-plugin-cyclonedx --output-file bom_berry.json --output-format JSON
+              mv /tmp/package.json.orig package.json '
+
+      - name: Upload BOM, analyze, and fetch metrics
+        id: dtrack_yarn4
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          scripts/upload_bom_and_fetch_metrics.sh \
+            --bom-file bom_berry.json \
+            --project-suffix berry
+
+      - name: Export SARIF findings (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/finding/project/$PROJECT_UUID?suppressed=false" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -H "Accept: application/sarif+json" \
+            -o dtrack-yarn4.sarif
+
+          test -s dtrack-yarn4.sarif || { echo "::error::dtrack-yarn4.sarif is missing or empty"; exit 1; }
+          jq -e '.runs and (.runs | type == "array")' dtrack-yarn4.sarif >/dev/null
+
+      - name: Export VEX and VDR JSON for SARIF mapping (yarn4)
+        env:
+          DTRACK_URL: ${{ vars.DTRACK_URL }}
+          DTRACK_API_KEY: ${{ secrets.DTRACK_API_KEY }}
+          PROJECT_UUID: ${{ steps.dtrack_yarn4.outputs.project_uuid }}
+        run: |
+          set -euo pipefail
+
+          curl -sSf "$DTRACK_URL/api/v1/vex/cyclonedx/project/$PROJECT_UUID" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o vex_yarn4.json
+
+          curl -sSf "$DTRACK_URL/api/v1/bom/cyclonedx/project/$PROJECT_UUID?variant=vdr&format=JSON" \
+            -H "X-Api-Key: $DTRACK_API_KEY" \
+            -o bom_yarn4.json
+
+          test -s vex_yarn4.json || { echo "::error::vex_yarn4.json is missing or empty"; exit 1; }
+          test -s bom_yarn4.json || { echo "::error::bom_yarn4.json is missing or empty"; exit 1; }
+
+      - name: Normalize SARIF for GitHub Code Scanning (yarn4)
+        run: |
+          set -euo pipefail
+
+          python3 scripts/normalize_sarif.py \
+            --input-sarif dtrack-yarn4.sarif \
+            --output-sarif dtrack-yarn4.sarif \
+            --vdr bom_yarn4.json \
+            --vex vex_yarn4.json \
+            --source yarn4 \
+            --tool-name "OWASP Dependency-Track (yarn4)" \
+            --rule-id-namespace "yarn4::" \
+            --location-mode fallback \
+            --fallback-uri bom.json \
+            --fallback-line 1
+
+          jq -e '.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri' dtrack-yarn4.sarif >/dev/null
+
+      - name: Upload SARIF to GitHub Code Scanning (yarn4)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: dtrack-yarn4.sarif
+          category: dependency-track-yarn4
+          ref: ${{ steps.code_scanning_target.outputs.code_scanning_ref }}
+          sha: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
+
+      - name: Estimate introduced candidates from SARIF vs base (yarn4)
+        id: introduced_candidates_yarn4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4)
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF_NAME: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          python3 scripts/estimate_introduced_candidates_from_sarif.py \
+            --sarif dtrack-yarn4.sarif \
+            --repo "$GITHUB_REPOSITORY" \
+            --tool-name "$TOOL_NAME" \
+            --head-branch "${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --base-branch "${BASE_REF:-${GITHUB_REF_NAME}}" \
+            --out-dir "$RUNNER_TEMP" \
+            --prefix "dtrack_yarn4"
+
+      - name: Compare with GitHub open alert instances (yarn4)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4)
+          HEAD_REF_NAME: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          scripts/report_open_code_scanning_alert_instances.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --tool-name "$TOOL_NAME" \
+            --ref "refs/heads/${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --output-prefix "yarn4_open_alerts"
+
+      - name: Report code scanning summary (yarn4)
+        run: |
+          set -euo pipefail
+
+          introduced_critical="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_critical_count }}"
+          introduced_high="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_high_count }}"
+          introduced_medium="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_medium_count }}"
+          introduced_low="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_low_count }}"
+          introduced_unknown="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_unknown_count }}"
+          introduced_total="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_all_count }}"
+          open_critical="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_critical_count }}"
+          open_high="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_high_count }}"
+          open_medium="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_medium_count }}"
+          open_low="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_low_count }}"
+          open_unknown="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_unknown_count }}"
+          open_total="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_all_count }}"
+          sarif_total="${{ steps.introduced_candidates_yarn4.outputs.sarif_rule_ids_all_count }}"
+          sarif_pkg_ver_total="${{ steps.introduced_candidates_yarn4.outputs.sarif_rule_pkg_ver_all_count }}"
+          base_total="${{ steps.introduced_candidates_yarn4.outputs.base_rule_ids_all_count }}"
+          baseline_missing="${{ steps.introduced_candidates_yarn4.outputs.baseline_missing }}"
+          summary_file="${{ steps.introduced_candidates_yarn4.outputs.summary_file }}"
+          branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4)\""
+          branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
+
+          introduced_critical="${introduced_critical:-0}"
+          introduced_high="${introduced_high:-0}"
+          introduced_medium="${introduced_medium:-0}"
+          introduced_low="${introduced_low:-0}"
+          introduced_unknown="${introduced_unknown:-0}"
+          introduced_total="${introduced_total:-0}"
+          open_critical="${open_critical:-0}"
+          open_high="${open_high:-0}"
+          open_medium="${open_medium:-0}"
+          open_low="${open_low:-0}"
+          open_unknown="${open_unknown:-0}"
+          open_total="${open_total:-0}"
+          sarif_total="${sarif_total:-0}"
+          sarif_pkg_ver_total="${sarif_pkg_ver_total:-0}"
+          base_total="${base_total:-0}"
+          baseline_missing="${baseline_missing:-false}"
+          summary_file="${summary_file:-}"
+
+          echo "::notice::Yarn4 introduced candidates vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
+          echo "### Yarn4 code scanning" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New issues detected (branch vs base):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $introduced_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $introduced_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $introduced_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Open issues in branch (not yet resolved):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $open_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $open_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $open_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $open_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SARIF rule IDs (all severities): $sarif_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SARIF unique findings (rule.id + package + version): $sarif_pkg_ver_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+            echo "- New issues list (head open - base open):" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.rule_ids.introduced_candidate_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
+            echo "- Open issues list in branch (still unresolved):" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.rule_ids.head_open_rule_ids_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- New issues list (head open - base open): unavailable" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Open issues list in branch (still unresolved): unavailable" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce newly introduced vulnerability gate (critical/high)
+        run: |
+          set -euo pipefail
+
+          crit="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_critical_count }}"
+          high="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_high_count }}"
+          med="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_medium_count }}"
+          low="${{ steps.introduced_candidates_yarn4.outputs.introduced_candidate_low_count }}"
+          branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (yarn4)\""
+          branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
+
+          crit="${crit:-0}"
+          high="${high:-0}"
+          med="${med:-0}"
+          low="${low:-0}"
+
+          echo "New issues detected (branch vs base): critical=$crit high=$high medium=$med low=$low"
+
+          if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "::error::New critical/high issues detected vs base (critical=$crit, high=$high, medium=$med, low=$low). Review: $branch_url"
+            exit 1
+          fi
+
+          echo "No new critical/high issues detected vs base"
