@@ -162,16 +162,19 @@ jobs:
             --prefix "dtrack_syft"
 
       - name: Compare with GitHub open alert instances (syft)
+        id: open_alerts_syft
         env:
           GH_TOKEN: ${{ github.token }}
           TOOL_NAME: OWASP Dependency-Track (syft)
+          BASE_REF: ${{ github.base_ref }}
           HEAD_REF_NAME: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           scripts/report_open_code_scanning_alert_instances.sh \
             --repo "$GITHUB_REPOSITORY" \
             --tool-name "$TOOL_NAME" \
-            --ref "refs/heads/${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --head-ref "refs/heads/${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --base-ref "refs/heads/${BASE_REF:-${GITHUB_REF_NAME}}" \
             --output-prefix "syft_open_alerts"
 
       - name: Report code scanning summary (syft)
@@ -194,7 +197,19 @@ jobs:
           sarif_pkg_ver_total="${{ steps.introduced_candidates_syft.outputs.sarif_rule_pkg_ver_all_count }}"
           base_total="${{ steps.introduced_candidates_syft.outputs.base_rule_ids_all_count }}"
           baseline_missing="${{ steps.introduced_candidates_syft.outputs.baseline_missing }}"
-          summary_file="${{ steps.introduced_candidates_syft.outputs.summary_file }}"
+          ui_open_total="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_instances_count }}"
+          ui_open_critical="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_critical_count }}"
+          ui_open_high="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_high_count }}"
+          ui_open_medium="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_medium_count }}"
+          ui_open_low="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_low_count }}"
+          ui_open_unknown="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_unknown_count }}"
+          ui_new_total="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_count }}"
+          ui_new_critical="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_critical_count }}"
+          ui_new_high="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_high_count }}"
+          ui_new_medium="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_medium_count }}"
+          ui_new_low="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_low_count }}"
+          ui_new_unknown="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_unknown_count }}"
+          ui_baseline_missing="${{ steps.open_alerts_syft.outputs.syft_open_alerts_baseline_missing }}"
           branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
           query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (syft)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
@@ -215,9 +230,22 @@ jobs:
           sarif_pkg_ver_total="${sarif_pkg_ver_total:-0}"
           base_total="${base_total:-0}"
           baseline_missing="${baseline_missing:-false}"
-          summary_file="${summary_file:-}"
+          ui_open_total="${ui_open_total:-0}"
+          ui_open_critical="${ui_open_critical:-0}"
+          ui_open_high="${ui_open_high:-0}"
+          ui_open_medium="${ui_open_medium:-0}"
+          ui_open_low="${ui_open_low:-0}"
+          ui_open_unknown="${ui_open_unknown:-0}"
+          ui_new_total="${ui_new_total:-0}"
+          ui_new_critical="${ui_new_critical:-0}"
+          ui_new_high="${ui_new_high:-0}"
+          ui_new_medium="${ui_new_medium:-0}"
+          ui_new_low="${ui_new_low:-0}"
+          ui_new_unknown="${ui_new_unknown:-0}"
+          ui_baseline_missing="${ui_baseline_missing:-false}"
 
-          echo "::notice::Syft introduced candidates vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
+          echo "::notice::Syft (unique rule.id) introduced vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
+          echo "::notice::Syft (GitHub alert instances) new vs base: critical=$ui_new_critical high=$ui_new_high total=$ui_new_total baseline_missing=$ui_baseline_missing"
           echo "### Syft code scanning" >> "$GITHUB_STEP_SUMMARY"
           echo "- New issues detected (branch vs base):" >> "$GITHUB_STEP_SUMMARY"
           echo "  - critical: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
@@ -237,25 +265,31 @@ jobs:
           echo "- SARIF unique findings (rule.id + package + version): $sarif_pkg_ver_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
-            echo "- New issues list (head open - base open):" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.rule_ids.introduced_candidate_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
-            echo "- Open issues list in branch (still unresolved):" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.rule_ids.head_open_rule_ids_all[]?' "$summary_file" | sed 's/^/  - /' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- New issues list (head open - base open): unavailable" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Open issues list in branch (still unresolved): unavailable" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "- Open alert instances in branch (GitHub UI):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $ui_open_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $ui_open_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $ui_open_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $ui_open_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $ui_open_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $ui_open_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- New alert instances vs base (head - base):" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - critical: $ui_new_critical" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - high: $ui_new_high" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - medium: $ui_new_medium" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - low: $ui_new_low" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - unknown: $ui_new_unknown" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - total: $ui_new_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Baseline missing for instance comparison (base has no open instances): $ui_baseline_missing" >> "$GITHUB_STEP_SUMMARY"
           echo "- Branch alerts URL: $branch_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce newly introduced vulnerability gate (critical/high)
         run: |
           set -euo pipefail
 
-          crit="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_critical_count }}"
-          high="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_high_count }}"
-          med="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_medium_count }}"
-          low="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_low_count }}"
+          crit="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_critical_count }}"
+          high="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_high_count }}"
+          med="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_medium_count }}"
+          low="${{ steps.open_alerts_syft.outputs.syft_open_alerts_introduced_instances_low_count }}"
           branch_name="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
           query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (syft)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
@@ -265,11 +299,11 @@ jobs:
           med="${med:-0}"
           low="${low:-0}"
 
-          echo "New issues detected (branch vs base): critical=$crit high=$high medium=$med low=$low"
+          echo "New alert instances detected vs base (head - base): critical=$crit high=$high medium=$med low=$low"
 
           if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
-            echo "::error::New critical/high issues detected vs base (critical=$crit, high=$high, medium=$med, low=$low). Review: $branch_url"
+            echo "::error::New critical/high alert instances detected vs base (critical=$crit, high=$high, medium=$med, low=$low). Review: $branch_url"
             exit 1
           fi
 
-          echo "No new critical/high issues detected vs base"
+          echo "No new critical/high alert instances detected vs base"
