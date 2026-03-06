@@ -161,6 +161,19 @@ jobs:
             --out-dir "$RUNNER_TEMP" \
             --prefix "dtrack_syft"
 
+      - name: Compare with GitHub open alert instances (syft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (syft)
+          HEAD_REF_NAME: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          scripts/report_open_code_scanning_alert_instances.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --tool-name "$TOOL_NAME" \
+            --ref "refs/heads/${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --output-prefix "syft_open_alerts"
+
       - name: Report code scanning summary (syft)
         run: |
           set -euo pipefail

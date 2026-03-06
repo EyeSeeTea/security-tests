@@ -166,6 +166,19 @@ jobs:
             --out-dir "$RUNNER_TEMP" \
             --prefix "dtrack_yarn4"
 
+      - name: Compare with GitHub open alert instances (yarn4)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL_NAME: OWASP Dependency-Track (yarn4)
+          HEAD_REF_NAME: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          scripts/report_open_code_scanning_alert_instances.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --tool-name "$TOOL_NAME" \
+            --ref "refs/heads/${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
+            --output-prefix "yarn4_open_alerts"
+
       - name: Report code scanning summary (yarn4)
         run: |
           set -euo pipefail
