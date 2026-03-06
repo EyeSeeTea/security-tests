@@ -183,6 +183,7 @@ jobs:
           open_unknown="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_unknown_count }}"
           open_total="${{ steps.introduced_candidates_yarn4.outputs.open_in_branch_all_count }}"
           sarif_total="${{ steps.introduced_candidates_yarn4.outputs.sarif_rule_ids_all_count }}"
+          sarif_pkg_ver_total="${{ steps.introduced_candidates_yarn4.outputs.sarif_rule_pkg_ver_all_count }}"
           base_total="${{ steps.introduced_candidates_yarn4.outputs.base_rule_ids_all_count }}"
           baseline_missing="${{ steps.introduced_candidates_yarn4.outputs.baseline_missing }}"
           summary_file="${{ steps.introduced_candidates_yarn4.outputs.summary_file }}"
@@ -203,6 +204,7 @@ jobs:
           open_unknown="${open_unknown:-0}"
           open_total="${open_total:-0}"
           sarif_total="${sarif_total:-0}"
+          sarif_pkg_ver_total="${sarif_pkg_ver_total:-0}"
           base_total="${base_total:-0}"
           baseline_missing="${baseline_missing:-false}"
           summary_file="${summary_file:-}"
@@ -224,6 +226,7 @@ jobs:
           echo "  - unknown: $open_unknown" >> "$GITHUB_STEP_SUMMARY"
           echo "  - total: $open_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- SARIF rule IDs (all severities): $sarif_total" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SARIF unique findings (rule.id + package + version): $sarif_pkg_ver_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
