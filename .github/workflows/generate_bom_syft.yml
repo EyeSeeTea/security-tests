@@ -143,24 +143,6 @@ jobs:
           ref: ${{ steps.code_scanning_target.outputs.code_scanning_ref }}
           sha: ${{ steps.code_scanning_target.outputs.code_scanning_sha }}
 
-      - name: Estimate introduced candidates from SARIF vs base (syft)
-        id: introduced_candidates_syft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TOOL_NAME: OWASP Dependency-Track (syft)
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_REF_NAME: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          python3 scripts/estimate_introduced_candidates_from_sarif.py \
-            --sarif dtrack-syft.sarif \
-            --repo "$GITHUB_REPOSITORY" \
-            --tool-name "$TOOL_NAME" \
-            --head-branch "${HEAD_REF_NAME:-${GITHUB_REF_NAME}}" \
-            --base-branch "${BASE_REF:-${GITHUB_REF_NAME}}" \
-            --out-dir "$RUNNER_TEMP" \
-            --prefix "dtrack_syft"
-
       - name: Compare with GitHub open alert instances (syft)
         id: open_alerts_syft
         env:
@@ -181,22 +163,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          introduced_critical="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_critical_count }}"
-          introduced_high="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_high_count }}"
-          introduced_medium="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_medium_count }}"
-          introduced_low="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_low_count }}"
-          introduced_unknown="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_unknown_count }}"
-          introduced_total="${{ steps.introduced_candidates_syft.outputs.introduced_candidate_all_count }}"
-          open_critical="${{ steps.introduced_candidates_syft.outputs.open_in_branch_critical_count }}"
-          open_high="${{ steps.introduced_candidates_syft.outputs.open_in_branch_high_count }}"
-          open_medium="${{ steps.introduced_candidates_syft.outputs.open_in_branch_medium_count }}"
-          open_low="${{ steps.introduced_candidates_syft.outputs.open_in_branch_low_count }}"
-          open_unknown="${{ steps.introduced_candidates_syft.outputs.open_in_branch_unknown_count }}"
-          open_total="${{ steps.introduced_candidates_syft.outputs.open_in_branch_all_count }}"
-          sarif_total="${{ steps.introduced_candidates_syft.outputs.sarif_rule_ids_all_count }}"
-          sarif_pkg_ver_total="${{ steps.introduced_candidates_syft.outputs.sarif_rule_pkg_ver_all_count }}"
-          base_total="${{ steps.introduced_candidates_syft.outputs.base_rule_ids_all_count }}"
-          baseline_missing="${{ steps.introduced_candidates_syft.outputs.baseline_missing }}"
+          sarif_uploaded_total="$(
+            jq -r '
+              [
+                .runs[]?.results[]?
+                | [
+                    (.ruleId // ""),
+                    (.properties.name // "unknown-package"),
+                    (.properties.version // "")
+                  ]
+                | join("|")
+              ]
+              | unique
+              | length
+            ' dtrack-syft.sarif
+          )"
           ui_open_total="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_instances_count }}"
           ui_open_critical="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_critical_count }}"
           ui_open_high="${{ steps.open_alerts_syft.outputs.syft_open_alerts_head_high_count }}"
@@ -214,22 +195,7 @@ jobs:
           query="is:open branch:${branch_name} tool:\"OWASP Dependency-Track (syft)\""
           branch_url="https://github.com/${GITHUB_REPOSITORY}/security/code-scanning?query=$(jq -rn --arg value "$query" '$value|@uri')"
 
-          introduced_critical="${introduced_critical:-0}"
-          introduced_high="${introduced_high:-0}"
-          introduced_medium="${introduced_medium:-0}"
-          introduced_low="${introduced_low:-0}"
-          introduced_unknown="${introduced_unknown:-0}"
-          introduced_total="${introduced_total:-0}"
-          open_critical="${open_critical:-0}"
-          open_high="${open_high:-0}"
-          open_medium="${open_medium:-0}"
-          open_low="${open_low:-0}"
-          open_unknown="${open_unknown:-0}"
-          open_total="${open_total:-0}"
-          sarif_total="${sarif_total:-0}"
-          sarif_pkg_ver_total="${sarif_pkg_ver_total:-0}"
-          base_total="${base_total:-0}"
-          baseline_missing="${baseline_missing:-false}"
+          sarif_uploaded_total="${sarif_uploaded_total:-0}"
           ui_open_total="${ui_open_total:-0}"
           ui_open_critical="${ui_open_critical:-0}"
           ui_open_high="${ui_open_high:-0}"
@@ -244,27 +210,9 @@ jobs:
           ui_new_unknown="${ui_new_unknown:-0}"
           ui_baseline_missing="${ui_baseline_missing:-false}"
 
-          echo "::notice::Syft (unique rule.id) introduced vs base: critical=$introduced_critical high=$introduced_high total=$introduced_total baseline_missing=$baseline_missing"
           echo "::notice::Syft (GitHub alert instances) new vs base: critical=$ui_new_critical high=$ui_new_high total=$ui_new_total baseline_missing=$ui_baseline_missing"
           echo "### Syft code scanning" >> "$GITHUB_STEP_SUMMARY"
-          echo "- New issues detected (branch vs base):" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - critical: $introduced_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - high: $introduced_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - medium: $introduced_medium" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - low: $introduced_low" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - unknown: $introduced_unknown" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - total: $introduced_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Open issues in branch (not yet resolved):" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - critical: $open_critical" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - high: $open_high" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - medium: $open_medium" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - low: $open_low" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - unknown: $open_unknown" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - total: $open_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SARIF rule IDs (all severities): $sarif_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SARIF unique findings (rule.id + package + version): $sarif_pkg_ver_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Base open rule IDs (all severities): $base_total" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Baseline missing (base has no open rule IDs): $baseline_missing" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SARIF findings uploaded: $sarif_uploaded_total" >> "$GITHUB_STEP_SUMMARY"
           echo "- Open alert instances in branch (GitHub UI):" >> "$GITHUB_STEP_SUMMARY"
           echo "  - critical: $ui_open_critical" >> "$GITHUB_STEP_SUMMARY"
           echo "  - high: $ui_open_high" >> "$GITHUB_STEP_SUMMARY"
