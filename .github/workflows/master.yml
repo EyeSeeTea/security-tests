@@ -10,10 +10,10 @@ on:
 jobs:
   dependency-track-syft:
     if: github.event_name == 'pull_request'
-    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-syft.yml@feature/add_bom_actions
+    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-syft.yml@feature/test_bom_actions
     secrets: inherit
 
   dependency-track-yarn4:
     if: github.event_name == 'pull_request'
-    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-yarn4.yml@feature/add_bom_actions
+    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-yarn4.yml@feature/test_bom_actions
     secrets: inherit
