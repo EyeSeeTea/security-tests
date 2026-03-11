@@ -8,10 +8,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  master-workflow:
-    # While BOM workflows are in development, consume from this branch.
-    uses: EyeSeeTea/github-workflows/.github/workflows/master.yml@feature/test_bom_actions
+  dependency-track-syft:
+    if: github.event_name == 'pull_request'
+    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-syft.yml@feature/add_bom_actions
     secrets: inherit
-    with:
-      # Use "all" (default) or an explicit list including dependency-track-yarn4,dependency-track-syft.
-      workflows_to_run: "dependency-track-yarn4,dependency-track-syft"
+
+  dependency-track-yarn4:
+    if: github.event_name == 'pull_request'
+    uses: EyeSeeTea/github-workflows/.github/workflows/dependency-track-yarn4.yml@feature/add_bom_actions
+    secrets: inherit
