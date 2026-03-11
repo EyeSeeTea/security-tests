@@ -10,7 +10,7 @@ on:
 jobs:
   master-workflow:
     # While BOM workflows are in development, consume from this branch.
-    uses: EyeSeeTea/github-workflows/.github/workflows/master.yml@feature/add_bom_actions
+    uses: EyeSeeTea/github-workflows/.github/workflows/master.yml@feature/test_bom_actions
     secrets: inherit
     with:
       # Use "all" (default) or an explicit list including dependency-track-yarn4,dependency-track-syft.
