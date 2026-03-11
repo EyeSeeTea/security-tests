@@ -13,5 +13,5 @@ jobs:
     uses: EyeSeeTea/github-workflows/.github/workflows/master.yml@feature/add_bom_actions
     secrets: inherit
     with:
-      # Use "all" (default) or an explicit list including dependency-track-runner.
-      workflows_to_run: "dependency-track-runner"
+      # Use "all" (default) or an explicit list including dependency-track-yarn4,dependency-track-syft.
+      workflows_to_run: "dependency-track-yarn4,dependency-track-syft"
